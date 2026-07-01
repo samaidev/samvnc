@@ -292,6 +292,10 @@ func (s *Session) handleText(data []byte) {
 		if err := s.injector.Mouse(m); err != nil {
 			s.logf("mouse inject: %v", err)
 		}
+	case protocol.TextEvent:
+		if err := s.injector.Type(m.Text); err != nil {
+			s.logf("text inject: %v", err)
+		}
 	case protocol.ClipboardEvent:
 		if s.srv.cfg.Clipboard {
 			sel := clipboard.SelClipboard

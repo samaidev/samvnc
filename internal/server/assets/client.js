@@ -33,6 +33,12 @@
   const clipBar = document.getElementById("clipboardBar");
   const clipText = document.getElementById("clipText");
   const clipSend = document.getElementById("clipSend");
+  const mobileBar = document.getElementById("mobileBar");
+  const kbBtn = document.getElementById("kbBtn");
+  const fnBtn = document.getElementById("fnBtn");
+  const kbInput = document.getElementById("kbInput");
+  const fnPanel = document.getElementById("fnPanel");
+  const fnMods = document.getElementById("fnMods");
 
   let desktopW = 0, desktopH = 0;
   let mouseMask = 0;
@@ -549,6 +555,124 @@
   setInterval(function () {
     if (!usePoll) sendJSON({ type: "ping", t: Date.now() });
   }, 15000);
+
+  // ---- Mobile: soft keyboard + function-key panel -------------------------
+  //
+  // Two on-screen buttons (visible on touch / narrow screens) summon:
+  //   1. Keyboard — focuses a hidden <input> so the mobile IME opens. Typed
+  //      text (including IME-composed Chinese, etc.) is sent as a "text"
+  //      message which the server injects via `xdotool type`. Control keys
+  //      (Backspace/Enter/Tab/Arrows) the IME emits are forwarded as key
+  //      events.
+  //   2. Fn — toggles a panel of function keys with sticky modifiers. Tap a
+  //      modifier (Ctrl/Alt/Shift/Super) to arm it; the next key tap is sent
+  //      with that modifier state, then the modifier is cleared.
+
+  // Soft keyboard.
+  let kbComposing = false;
+  kbInput.addEventListener("compositionstart", function () { kbComposing = true; });
+  kbInput.addEventListener("compositionend", function (e) {
+    kbComposing = false;
+    const text = e.data || kbInput.value;
+    if (text) sendJSON({ type: "text", text: text });
+    kbInput.value = "";
+  });
+  // Non-IME input: each inserted character is sent immediately and the field
+  // is cleared so it never accumulates (we only need it to host the IME).
+  kbInput.addEventListener("input", function (e) {
+    if (kbComposing) return; // wait for compositionend
+    const v = kbInput.value;
+    if (v) {
+      sendJSON({ type: "text", text: v });
+      kbInput.value = "";
+    }
+  });
+  // Control keys from the soft keyboard that are not text.
+  kbInput.addEventListener("keydown", function (e) {
+    if (kbComposing) return; // let IME handle its own keys
+    switch (e.key) {
+      case "Backspace":
+      case "Enter":
+      case "Tab":
+        e.preventDefault();
+        sendKeyTap(e.key, e.code);
+        break;
+      case "ArrowLeft": case "ArrowRight": case "ArrowUp": case "ArrowDown":
+      case "Escape":
+        e.preventDefault();
+        sendKeyTap(e.key, e.code);
+        break;
+    }
+  });
+  // Hide the input when it loses focus (IME dismissed).
+  kbInput.addEventListener("blur", function () {
+    setTimeout(function () {
+      if (document.activeElement !== kbInput) {
+        kbInput.classList.remove("visible");
+      }
+    }, 200);
+  });
+
+  kbBtn.addEventListener("click", function () {
+    fnPanel.classList.add("hidden");
+    kbInput.classList.add("visible");
+    // focus must happen in the same user-gesture tick or mobile Safari
+    // refuses to open the IME.
+    kbInput.focus({ preventScroll: true });
+  });
+  fnBtn.addEventListener("click", function () {
+    kbInput.classList.remove("visible");
+    kbInput.blur();
+    fnPanel.classList.toggle("hidden");
+  });
+
+  // Function-key panel: sticky modifiers + key taps.
+  let stickyMods = { ctrl: false, alt: false, shift: false, meta: false };
+
+  function refreshModButtons() {
+    const btns = fnMods.querySelectorAll("button[data-mod]");
+    btns.forEach(function (b) {
+      if (stickyMods[b.dataset.mod]) b.classList.add("active");
+      else b.classList.remove("active");
+    });
+  }
+
+  function clearStickyMods() {
+    stickyMods = { ctrl: false, alt: false, shift: false, meta: false };
+    refreshModButtons();
+  }
+
+  // Modifier buttons toggle their sticky state.
+  fnMods.querySelectorAll("button[data-mod]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      stickyMods[b.dataset.mod] = !stickyMods[b.dataset.mod];
+      refreshModButtons();
+    });
+  });
+  fnPanel.querySelector(".fn-close").addEventListener("click", function () {
+    fnPanel.classList.add("hidden");
+    clearStickyMods();
+  });
+
+  // Send a key tap (keydown + keyup) carrying the current sticky modifiers,
+  // then clear the modifiers so the next tap is plain.
+  function sendKeyTap(key, code) {
+    sendJSON({
+      type: "key", key: key, code: code, down: true, repeat: false,
+      ctrl: stickyMods.ctrl, alt: stickyMods.alt, shift: stickyMods.shift, meta: stickyMods.meta,
+    });
+    sendJSON({
+      type: "key", key: key, code: code, down: false, repeat: false,
+      ctrl: stickyMods.ctrl, alt: stickyMods.alt, shift: stickyMods.shift, meta: stickyMods.meta,
+    });
+    clearStickyMods();
+  }
+
+  fnPanel.querySelectorAll(".fn-row button[data-key]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      sendKeyTap(b.dataset.key, b.dataset.code);
+    });
+  });
 
   // ---- FPS meter -----------------------------------------------------------
   function startFps() {

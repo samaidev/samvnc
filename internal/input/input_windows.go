@@ -177,6 +177,22 @@ func (i *sendInputInjector) Key(ev protocol.KeyEvent) error {
 	return nil
 }
 
+// Type injects a Unicode string via KEYEVENTF_UNICODE SendInput events, one
+// per rune. Used by the mobile soft keyboard for IME/composed text.
+func (i *sendInputInjector) Type(text string) error {
+	for _, r := range text {
+		sc := uint16(r)
+		for _, flags := range []uint32{keyDown | keyUnicode, keyUp | keyUnicode} {
+			ki := keybdInput{Type: inputKeyboard, WScan: sc, DwFlags: flags}
+			var raw [32]byte
+			*(*keybdInput)(unsafe.Pointer(&raw[0])) = ki
+			in := input{Type: inputKeyboard, Mi: raw}
+			procSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
+		}
+	}
+	return nil
+}
+
 func domToVK(code, key string) uint16 {
 	switch code {
 	case "Enter":

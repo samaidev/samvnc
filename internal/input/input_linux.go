@@ -37,6 +37,28 @@ func (*xdotoolInjector) Name() string { return "linux-xdotool" }
 
 func (i *xdotoolInjector) Close() error { return nil }
 
+// Type injects an arbitrary Unicode string via `xdotool type`. This is the
+// mobile soft-keyboard path: IME/composed text (Chinese, etc.) is typed as a
+// whole string rather than per-key keysym, which would not map non-ASCII.
+// --clearmodifiers releases any held modifiers so the text is not garbled;
+// --delay 0 types as fast as possible; -- guards against leading-dash input.
+func (i *xdotoolInjector) Type(text string) error {
+	if text == "" {
+		return nil
+	}
+	if debugInput {
+		fmt.Fprintf(os.Stderr, "[input] xdotool type %q\n", text)
+	}
+	// exec.Command does not go through a shell, so passing text as an arg is
+	// safe from command injection.
+	cmd := exec.Command("xdotool", "type", "--clearmodifiers", "--delay", "0", "--", text)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("xdotool type: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func (i *xdotoolInjector) Mouse(ev protocol.MouseEvent) error {
 	root := strings.Builder{}
 	root.WriteString("mousemove ")

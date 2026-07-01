@@ -460,6 +460,10 @@ func (h *HTTPSession) handleClientMessage(msg any) {
 		if err := h.injector.Mouse(m); err != nil {
 			h.logf("mouse inject: %v", err)
 		}
+	case protocol.TextEvent:
+		if err := h.injector.Type(m.Text); err != nil {
+			h.logf("text inject: %v", err)
+		}
 	case protocol.ClipboardEvent:
 		if h.srv.cfg.Clipboard {
 			sel := clipboard.SelClipboard

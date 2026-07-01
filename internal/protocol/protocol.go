@@ -103,6 +103,15 @@ const (
 	ButtonX2     uint16 = 1 << 4
 )
 
+// TextEvent injects a string of text (any Unicode) into the remote desktop via
+// the platform's native text-input path (e.g. xdotool type on X11). Used by
+// the mobile soft-keyboard so IME/composed text (Chinese, etc.) reaches the
+// remote app without per-key keysym mapping.
+type TextEvent struct {
+	Type string `json:"type"` // "text"
+	Text string `json:"text"`
+}
+
 // ClipboardEvent carries shared clipboard contents.
 type ClipboardEvent struct {
 	Type      string `json:"type"`      // "clipboard"
@@ -297,6 +306,10 @@ func DecodeClientMessage(data []byte) (any, error) {
 		return m, err
 	case "clipboard":
 		var m ClipboardEvent
+		err := json.Unmarshal(data, &m)
+		return m, err
+	case "text":
+		var m TextEvent
 		err := json.Unmarshal(data, &m)
 		return m, err
 	case "clipboard_request":

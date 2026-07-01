@@ -12,6 +12,12 @@ type Injector interface {
 	// translated to a platform-native keysym + keycode internally.
 	Key(ev protocol.KeyEvent) error
 
+	// Type injects an arbitrary Unicode string (used by the mobile soft
+	// keyboard so IME/composed text reaches the remote app without per-key
+	// keysym mapping). The string is sent through the platform's native
+	// text-input path (e.g. xdotool type on X11).
+	Type(text string) error
+
 	// Mouse injects a pointer event with absolute coordinates and a button
 	// bitmask (see protocol.Button* constants).
 	Mouse(ev protocol.MouseEvent) error

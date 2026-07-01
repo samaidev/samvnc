@@ -107,3 +107,91 @@ button:hover { background: #30363d; }
   resize: none;
   height: 28px;
 }
+
+/* ---- Mobile keyboard / function-key panel ---- */
+/* The mobile bar is shown only on touch devices via a media+hover query. */
+#mobileBar {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #161b22;
+  border-top: 1px solid #30363d;
+  z-index: 30;
+}
+/* Coarse pointer (touch) OR narrow viewport => show the mobile bar. */
+@media (pointer: coarse), (max-width: 720px) {
+  #mobileBar { display: flex; }
+  /* The clipboard bar collides with the mobile bar on small screens; let the
+     mobile bar take priority and hide the clipboard bar there. */
+  #clipboardBar { display: none !important; }
+  #stage { height: calc(100% - 49px - 48px); }
+}
+#mobileBar button {
+  flex: 1;
+  padding: 10px 8px;
+  font-size: 14px;
+}
+
+/* Hidden text input that hosts the soft keyboard. Off-screen but focusable so
+   the mobile IME opens. It is moved on-screen only while focused to keep the
+   caret visible for IME composition. */
+#kbInput {
+  position: fixed;
+  left: 8px;
+  bottom: 56px;
+  width: calc(100% - 16px);
+  max-width: 480px;
+  background: #0d1117;
+  color: #e6edf3;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 16px; /* >=16px prevents iOS zoom-on-focus */
+  z-index: 40;
+  display: none;
+}
+#kbInput.visible { display: block; }
+
+/* Function-key panel. */
+#fnPanel {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 56px;
+  width: calc(100% - 16px);
+  max-width: 520px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 8px;
+  z-index: 40;
+  user-select: none;
+}
+#fnPanel.hidden { display: none; }
+.fn-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.fn-row:last-child { margin-bottom: 0; }
+.fn-row button {
+  flex: 1;
+  padding: 12px 4px;
+  font-size: 13px;
+  min-width: 0;
+  touch-action: manipulation;
+}
+.fn-row button.active {
+  background: #1f6feb;
+  border-color: #388bfd;
+  color: #fff;
+}
+.fn-row .fn-close {
+  flex: 0 0 auto;
+  width: 40px;
+  background: #21262d;
+}

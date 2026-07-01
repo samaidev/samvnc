@@ -40,6 +40,66 @@
     </div>
   </div>
 
+  <!-- Mobile toolbar: two buttons to summon the soft keyboard and the
+       function-key panel. Hidden on touch-less devices via CSS. -->
+  <div id="mobileBar">
+    <button id="kbBtn" title="Keyboard">Keyboard</button>
+    <button id="fnBtn" title="Function keys">Fn</button>
+  </div>
+  <!-- Hidden input that receives soft-keyboard input. It is focused on demand
+       so the mobile OS shows the IME; typed text is forwarded as a "text"
+       message and the field is cleared after each commit. -->
+  <input id="kbInput" type="text" autocomplete="off" autocorrect="off"
+         autocapitalize="off" spellcheck="false" />
+
+  <!-- Function-key panel: sticky modifiers + common keys. -->
+  <div id="fnPanel" class="hidden">
+    <div class="fn-row" id="fnMods">
+      <button data-mod="ctrl">Ctrl</button>
+      <button data-mod="alt">Alt</button>
+      <button data-mod="shift">Shift</button>
+      <button data-mod="meta">Super</button>
+      <button class="fn-close" title="Close">✕</button>
+    </div>
+    <div class="fn-row">
+      <button data-key="Escape" data-code="Escape">Esc</button>
+      <button data-key="Tab" data-code="Tab">Tab</button>
+      <button data-key="Backspace" data-code="Backspace">⌫</button>
+      <button data-key="Enter" data-code="Enter">Enter</button>
+      <button data-key="Space" data-code="Space">Space</button>
+    </div>
+    <div class="fn-row">
+      <button data-key="ArrowUp" data-code="ArrowUp">↑</button>
+      <button data-key="ArrowLeft" data-code="ArrowLeft">←</button>
+      <button data-key="ArrowDown" data-code="ArrowDown">↓</button>
+      <button data-key="ArrowRight" data-code="ArrowRight">→</button>
+    </div>
+    <div class="fn-row">
+      <button data-key="Home" data-code="Home">Home</button>
+      <button data-key="End" data-code="End">End</button>
+      <button data-key="PageUp" data-code="PageUp">PgUp</button>
+      <button data-key="PageDown" data-code="PageDown">PgDn</button>
+      <button data-key="Insert" data-code="Insert">Ins</button>
+      <button data-key="Delete" data-code="Delete">Del</button>
+    </div>
+    <div class="fn-row">
+      <button data-key="F1" data-code="F1">F1</button>
+      <button data-key="F2" data-code="F2">F2</button>
+      <button data-key="F3" data-code="F3">F3</button>
+      <button data-key="F4" data-code="F4">F4</button>
+      <button data-key="F5" data-code="F5">F5</button>
+      <button data-key="F6" data-code="F6">F6</button>
+    </div>
+    <div class="fn-row">
+      <button data-key="F7" data-code="F7">F7</button>
+      <button data-key="F8" data-code="F8">F8</button>
+      <button data-key="F9" data-code="F9">F9</button>
+      <button data-key="F10" data-code="F10">F10</button>
+      <button data-key="F11" data-code="F11">F11</button>
+      <button data-key="F12" data-code="F12">F12</button>
+    </div>
+  </div>
+
   <div id="clipboardBar" class="hidden">
     <span>Clipboard (auto-sync Ctrl+C/V) ·</span>
     <textarea id="clipText" placeholder="Shared clipboard (Ctrl+C / Ctrl+V auto-sync)…"></textarea>

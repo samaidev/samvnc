@@ -131,6 +131,17 @@ func (i *Injector) Key(ev protocol.KeyEvent) error {
 	return nil
 }
 
+// Type appends arbitrary Unicode text (mobile soft keyboard / IME input).
+func (i *Injector) Type(text string) error {
+	i.s.mu.Lock()
+	defer i.s.mu.Unlock()
+	i.s.keys = append(i.s.keys, []rune(text)...)
+	if len(i.s.keys) > 80 {
+		i.s.keys = i.s.keys[len(i.s.keys)-80:]
+	}
+	return nil
+}
+
 func (i *Injector) Mouse(ev protocol.MouseEvent) error {
 	i.s.mu.Lock()
 	defer i.s.mu.Unlock()
