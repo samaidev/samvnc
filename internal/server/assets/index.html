@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>SamVNC &mdash; Remote Desktop</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="topbar">
+    <div class="brand">SamVNC</div>
+    <div class="status" id="status">connecting…</div>
+    <div class="spacer"></div>
+    <label class="ctl">Quality
+      <select id="quality">
+        <option value="1">Low</option>
+        <option value="2" selected>Medium</option>
+        <option value="3">High</option>
+      </select>
+    </label>
+    <label class="ctl">Mode
+      <select id="mode">
+        <option value="0" selected>Auto</option>
+        <option value="1">P2P</option>
+        <option value="2">Relay</option>
+      </select>
+    </label>
+    <button id="fsBtn" title="Fullscreen">Fullscreen</button>
+    <span id="stats" class="stats"></span>
+  </div>
+
+  <div id="stage">
+    <canvas id="screen" tabindex="0"></canvas>
+    <div id="overlay" class="hidden">
+      <div class="dialog">
+        <h2 id="overlayTitle">Disconnected</h2>
+        <p id="overlayMsg"></p>
+        <button id="reconnect">Reconnect</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="clipboardBar" class="hidden">
+    <span>Clipboard sync</span>
+    <textarea id="clipText" placeholder="Shared clipboard…"></textarea>
+    <button id="clipSend">Send to remote</button>
+  </div>
+
+  <script src="/client.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+.env
+/samvnc-server
+/samvnc-relay
