@@ -32,6 +32,10 @@ type Config struct {
 	// Static web assets directory. If empty, the embedded UI is used.
 	WebDir string
 
+	// Demo forces the synthetic in-memory desktop backend (no real display).
+	// Useful on headless servers and for trying SamVNC without a desktop.
+	Demo bool
+
 	// Verbose logging.
 	Verbose bool
 }
@@ -104,6 +108,9 @@ func FromEnv() Config {
 	}
 	if v := os.Getenv("SAMVNC_VERBOSE"); v != "" {
 		c.Verbose = parseBool(v)
+	}
+	if v := os.Getenv("SAMVNC_DEMO"); v != "" {
+		c.Demo = parseBool(v)
 	}
 
 	// Tunnel env.

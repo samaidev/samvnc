@@ -4,47 +4,91 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"path"
 	"strings"
+
+	"github.com/gorilla/websocket"
 )
 
 //go:embed assets/*
 var assetsFS embed.FS
 
-// handleIndex serves the embedded browser UI. Static files live under
-// assets/ and are served at the root path (e.g. /client.js, /style.css).
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/")
-	if path == "" {
-		path = "index.html"
-	}
-	// Security: prevent path traversal.
-	if strings.Contains(path, "..") {
-		http.NotFound(w, r)
+// assetFiles is the set of embedded static files served by basename. Because
+// aitun.cc publishes each tunnel under a path prefix (e.g. https://aitun.cc/abc123),
+// SamVNC serves assets by basename regardless of the prefix so the UI works
+// both on the local port and behind the tunnel.
+var assetFiles = map[string]bool{
+	"index.html": true,
+	"client.js":  true,
+	"style.css":  true,
+}
+
+// handleIndex routes all HTTP traffic. The WebSocket endpoint is matched by
+// path suffix ("/ws"), which makes it work under any path prefix.
+func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	p := r.URL.Path
+
+	// WebSocket upgrade — matches "/ws" and ".../<prefix>/ws".
+	if p == "/ws" || strings.HasSuffix(p, "/ws") {
+		s.handleWS(w, r)
 		return
 	}
+
+	// SSE / POST transport (used behind aitun.cc where visitor WS is blocked).
+	if p == "/stream" || strings.HasSuffix(p, "/stream") {
+		s.handleStream(w, r)
+		return
+	}
+	if p == "/input" || strings.HasSuffix(p, "/input") {
+		s.handleInput(w, r)
+		return
+	}
+	if p == "/poll" || strings.HasSuffix(p, "/poll") {
+		s.handlePoll(w, r)
+		return
+	}
+	if p == "/state" || strings.HasSuffix(p, "/state") {
+		s.handleState(w, r)
+		return
+	}
+
+	base := path.Base(p)
+	if base == "." || base == "/" || p == "/" {
+		base = "index.html"
+	}
+
 	sub, err := fs.Sub(assetsFS, "assets")
 	if err != nil {
 		http.Error(w, "asset error", http.StatusInternalServerError)
 		return
 	}
-	// Default content type.
+
 	switch {
-	case strings.HasSuffix(path, ".html"):
+	case strings.HasSuffix(base, ".html"):
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	case strings.HasSuffix(path, ".js"):
+	case strings.HasSuffix(base, ".js"):
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-	case strings.HasSuffix(path, ".css"):
+	case strings.HasSuffix(base, ".css"):
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	}
-	data, err := fs.ReadFile(sub, path)
-	if err != nil {
-		// Fall back to index.html for unknown routes (SPA-style).
-		data, err = fs.ReadFile(sub, "index.html")
-		if err != nil {
-			http.NotFound(w, r)
+
+	if assetFiles[base] {
+		data, err := fs.ReadFile(sub, base)
+		if err == nil {
+			_, _ = w.Write(data)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	}
+
+	// Unknown route → serve index.html (SPA fallback) so deep links work.
+	data, err := fs.ReadFile(sub, "index.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(data)
 }
+
+// keep websocket import referenced even if upgrader moves.
+var _ = websocket.Upgrader{}

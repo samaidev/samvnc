@@ -1,9 +1,16 @@
 // SamVNC browser client.
 //
-// Connects to /ws over ws:// or wss:// (so it works both on the local port and
-// through the aitun.cc TCP+TLS tunnel). Parses the SamVNC binary protocol and
-// renders frames to a canvas, while sending keyboard / mouse / clipboard events
-// back to the server.
+// Two transports are supported:
+//   - WebSocket at /ws (best latency; used for local / direct connections).
+//   - Single-connection long polling at /poll (used behind aitun.cc free
+//     tunnels, which permit only ONE concurrent HTTP connection). The browser
+//     POSTs its accumulated input batch plus the last frame seq it has; the
+//     server processes the inputs, waits briefly for a fresher frame, and
+//     returns the newest frame + state. The browser immediately re-POSTs, so
+//     input and frames never need a second concurrent connection.
+//
+// Both transports carry the same SamVNC protocol: JSON control messages and
+// 24-byte-header binary screen frames.
 (function () {
   "use strict";
 
@@ -27,7 +34,6 @@
   const clipText = document.getElementById("clipText");
   const clipSend = document.getElementById("clipSend");
 
-  let ws = null;
   let desktopW = 0, desktopH = 0;
   let mouseMask = 0;
   let currentBlobUrl = null;
@@ -35,35 +41,171 @@
   let fpsTimer = null;
   let fpsCount = 0;
 
-  // ---- WebSocket plumbing --------------------------------------------------
-  function wsUrl() {
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    return proto + "//" + location.host + "/ws";
+  // Transport state.
+  let ws = null;            // WebSocket mode
+  let usePoll = false;      // selected transport
+  let pollInFlight = false;
+  let pollStopped = false;
+  let lastSeq = 0;
+  let inputQueue = [];      // messages waiting for the next /poll batch
+  let lastMouseTs = 0;      // mouse-move throttle
+
+  // Path prefix preserving the aitun.cc tunnel code (e.g. https://aitun.cc/<code>).
+  function prefix() {
+    let p = location.pathname.replace(/\/+$/, "");
+    if (p === "") p = "";
+    return p;
+  }
+
+  function usePollMode() {
+    // aitun.cc free tunnels permit only one concurrent connection, so use the
+    // single-connection /poll transport there.
+    return location.hostname === "aitun.cc" ||
+      location.hostname.endsWith(".aitun.cc");
   }
 
   function connect() {
     setStatus("connecting…");
     hideOverlay();
+    if (usePollMode()) {
+      usePoll = true;
+      connectPoll();
+    } else {
+      usePoll = false;
+      connectWS();
+    }
+  }
+
+  // ---- WebSocket transport -------------------------------------------------
+  function wsUrl() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    return proto + "//" + location.host + prefix() + "/ws";
+  }
+
+  function connectWS() {
     ws = new WebSocket(wsUrl());
     ws.binaryType = "arraybuffer";
-
     ws.onopen = function () {
       setStatus("authorizing…");
       sendHello();
       startFps();
     };
-    ws.onmessage = onMessage;
+    ws.onmessage = onWSMessage;
     ws.onclose = function () {
       setStatus("disconnected");
       showOverlay("Disconnected", "The remote session ended.");
       stopFps();
     };
-    ws.onerror = function () {
-      setStatus("connection error");
-    };
+    ws.onerror = function () { setStatus("connection error"); };
   }
 
+  function onWSMessage(ev) {
+    if (typeof ev.data === "string") {
+      handleText(JSON.parse(ev.data));
+      return;
+    }
+    // Binary frame: 24-byte header + image payload.
+    const buf = new Uint8Array(ev.data);
+    parseFrame(buf);
+    fpsCount++;
+  }
+
+  // ---- Long-poll transport -------------------------------------------------
+  function connectPoll() {
+    pollStopped = false;
+    lastSeq = 0;
+    inputQueue = [];
+    startFps();
+    // Kick off the poll loop. Each round POSTs the queued inputs and the last
+    // seq, then immediately re-posts when the response arrives.
+    sendHello();
+    pollLoop();
+  }
+
+  async function pollLoop() {
+    if (pollStopped) return;
+    if (pollInFlight) return;
+    pollInFlight = true;
+    // Snapshot + clear the input queue so new events buffer for the next round.
+    const batch = inputQueue;
+    inputQueue = [];
+    let resp;
+    try {
+      const r = await fetch(prefix() + "/poll", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seq: lastSeq, inputs: batch }),
+        keepalive: true,
+        cache: "no-store",
+      });
+      if (!r.ok) {
+        setStatus("poll error " + r.status);
+        pollInFlight = false;
+        if (pollStopped) return;
+        setTimeout(pollLoop, 500);
+        return;
+      }
+      resp = await r.json();
+    } catch (e) {
+      setStatus("network error, retrying…");
+      pollInFlight = false;
+      if (pollStopped) return;
+      setTimeout(pollLoop, 800);
+      return;
+    }
+
+    if (resp.ack) handleText(resp.ack);
+    if (resp.frame) {
+      const bin = base64ToBytes(resp.frame);
+      if (bin) { parseFrame(bin); fpsCount++; }
+    }
+    if (resp.clip !== undefined && resp.clip !== null) {
+      handleText({ type: "clipboard", text: resp.clip });
+    }
+    if (resp.stats) handleText(resp.stats);
+    if (resp.error) { showOverlay("Session error", resp.error); }
+    if (typeof resp.seq === "number") lastSeq = resp.seq;
+
+    pollInFlight = false;
+    if (pollStopped) return;
+    // Immediately start the next round; inputs queued meanwhile ride along.
+    setTimeout(pollLoop, 0);
+  }
+
+  function base64ToBytes(b64) {
+    try {
+      const bin = atob(b64);
+      const u = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+      return u;
+    } catch (e) { return null; }
+  }
+
+  // ---- Shared frame parser -------------------------------------------------
+  function parseFrame(buf) {
+    if (buf.length < BIN_HEADER_LEN) return;
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const magic = dv.getUint16(0, true);
+    if (magic !== FRAME_MAGIC) return;
+    const format = dv.getUint8(3);
+    const flags = dv.getUint8(17);
+    const payloadLen = dv.getUint32(18, true);
+    const payload = buf.slice(BIN_HEADER_LEN, BIN_HEADER_LEN + payloadLen);
+    drawFrame(format, payload, flags);
+  }
+
+  // ---- Output: send to server ----------------------------------------------
   function sendJSON(obj) {
+    if (usePoll) {
+      // Throttle high-frequency mouse moves to ~60/s to keep batches small.
+      if (obj.type === "mouse") {
+        const now = Date.now();
+        if (now - lastMouseTs < 16) return;
+        lastMouseTs = now;
+      }
+      inputQueue.push(obj);
+      return;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(obj));
     }
@@ -83,25 +225,6 @@
   }
 
   // ---- Message handling ----------------------------------------------------
-  function onMessage(ev) {
-    if (typeof ev.data === "string") {
-      handleText(JSON.parse(ev.data));
-      return;
-    }
-    // Binary frame: 24-byte header + image payload.
-    const buf = new Uint8Array(ev.data);
-    if (buf.length < BIN_HEADER_LEN) return;
-    const dv = new DataView(ev.data);
-    const magic = dv.getUint16(0, true);
-    if (magic !== FRAME_MAGIC) return;
-    const format = dv.getUint8(3);
-    const flags = dv.getUint8(17);
-    const payloadLen = dv.getUint32(18, true);
-    const payload = buf.slice(BIN_HEADER_LEN, BIN_HEADER_LEN + payloadLen);
-    drawFrame(format, payload, flags);
-    fpsCount++;
-  }
-
   function handleText(msg) {
     switch (msg.type) {
       case "hello_ack":
@@ -114,7 +237,6 @@
           (msg.p2p ? "  P2P" : "  relay")
         );
         if (msg.relay_url) {
-          // Surface the public tunnel URL for convenience.
           console.log("SamVNC public URL:", msg.relay_url);
         }
         clipBar.classList.remove("hidden");
@@ -122,7 +244,6 @@
       case "clipboard":
         if (clipText.value !== msg.text) {
           clipText.value = msg.text;
-          // Also push into the local clipboard when focused.
           if (navigator.clipboard && document.hasFocus()) {
             navigator.clipboard.writeText(msg.text).catch(function () {});
           }
@@ -133,7 +254,6 @@
           "fps " + msg.fps.toFixed(0) + (msg.p2p ? "  P2P" : "  relay");
         break;
       case "pong":
-        // latency could be computed from msg.t; ignored for now.
         break;
       case "error":
         showOverlay("Session error", msg.reason);
@@ -176,7 +296,7 @@
   });
 
   // ---- Input: mouse --------------------------------------------------------
-  const BTN = { 0: 1, 1: 2, 2: 4, 3: 8, 4: 16 }; // button index -> mask
+  const BTN = { 0: 1, 1: 2, 2: 4, 3: 8, 4: 16 };
 
   function desktopCoords(e) {
     const rect = canvas.getBoundingClientRect();
@@ -235,7 +355,6 @@
   clipSend.addEventListener("click", function () {
     sendJSON({ type: "clipboard", text: clipText.value });
   });
-  // Auto-sync local clipboard into the remote when the window gains focus.
   window.addEventListener("focus", function () {
     if (navigator.clipboard) {
       navigator.clipboard.readText().then(function (t) {
@@ -251,9 +370,7 @@
     sendJSON({ type: "quality", quality: parseInt(qSel.value, 10) });
   });
   modeSel.addEventListener("change", function () {
-    // Mode change requires a fresh hello / reconnect.
-    if (ws) ws.close();
-    setTimeout(connect, 100);
+    reconnect();
   });
   fsBtn.addEventListener("click", function () {
     if (!document.fullscreenElement) {
@@ -262,11 +379,17 @@
       document.exitFullscreen();
     }
   });
-  reconnectBtn.addEventListener("click", connect);
+  reconnectBtn.addEventListener("click", reconnect);
 
-  // Keep the link alive.
+  function reconnect() {
+    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    pollStopped = true;
+    connect();
+  }
+
+  // Keep the link alive (WS mode only; poll mode is self-keeping).
   setInterval(function () {
-    sendJSON({ type: "ping", t: Date.now() });
+    if (!usePoll) sendJSON({ type: "ping", t: Date.now() });
   }, 15000);
 
   // ---- FPS meter -----------------------------------------------------------

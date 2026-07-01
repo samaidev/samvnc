@@ -16,6 +16,7 @@ import (
 	"github.com/samaidev/samvnc/internal/capture"
 	"github.com/samaidev/samvnc/internal/clipboard"
 	"github.com/samaidev/samvnc/internal/compress"
+	"github.com/samaidev/samvnc/internal/demo"
 	"github.com/samaidev/samvnc/internal/config"
 	"github.com/samaidev/samvnc/internal/input"
 	"github.com/samaidev/samvnc/internal/protocol"
@@ -38,6 +39,9 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[*Session]struct{}
+
+	httpMu   sync.Mutex
+	httpSess *HTTPSession
 }
 
 // New constructs a Server.
@@ -65,15 +69,10 @@ func (s *Server) SetRelayURL(u string) {
 }
 
 // Handler returns the HTTP handler serving the UI and the /ws endpoint.
+// A single catch-all handler is used so the UI works behind aitun.cc's
+// path-prefixed tunnel URLs (e.g. https://aitun.cc/<code>).
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleIndex)
-	mux.HandleFunc("/ws", s.handleWS)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	return mux
+	return http.HandlerFunc(s.handleHTTP)
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -124,21 +123,37 @@ type outMsg struct {
 }
 
 func newSession(s *Server, conn *websocket.Conn) (*Session, error) {
-	cap, err := capture.New()
-	if err != nil {
-		return nil, err
+	var cap capture.Capturer
+	var inj input.Injector
+	var clip clipboard.Manager
+
+	if s.cfg.Demo {
+		// Forced synthetic backend (headless sandbox / demo).
+		cap = demo.NewCapturer()
+		inj = demo.NewInjector()
+		clip = demo.NewManager()
+		s.logf("backend: demo (forced)")
+	} else {
+		c, err := capture.New()
+		if err != nil {
+			s.logf("capture: native unavailable (%v), falling back to demo", err)
+			c = demo.NewCapturer()
+		}
+		cap = c
+		i, err := input.New()
+		if err != nil {
+			s.logf("input: native unavailable (%v), falling back to demo", err)
+			i = demo.NewInjector()
+		}
+		inj = i
+		m, err := clipboard.New()
+		if err != nil {
+			s.logf("clipboard: native unavailable (%v), falling back to demo", err)
+			m = demo.NewManager()
+		}
+		clip = m
 	}
-	inj, err := input.New()
-	if err != nil {
-		cap.Close()
-		return nil, err
-	}
-	clip, err := clipboard.New()
-	if err != nil {
-		cap.Close()
-		inj.Close()
-		return nil, err
-	}
+
 	q := parseQuality(s.cfg.DefaultQuality)
 	return &Session{
 		srv:      s,

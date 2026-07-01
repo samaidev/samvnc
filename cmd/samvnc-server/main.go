@@ -54,6 +54,7 @@ func main() {
 	tcpOnly := flag.Bool("tcp-only", cfg.Tunnel.TCPOnly, "use a TCP-only tunnel")
 	noClip := flag.Bool("no-clipboard", !cfg.Clipboard, "disable clipboard sharing")
 	verbose := flag.Bool("verbose", cfg.Verbose, "verbose logging")
+	demo := flag.Bool("demo", cfg.Demo, "use the synthetic in-memory desktop backend (headless)")
 	flag.Parse()
 
 	cfg.ListenAddr = *listen
@@ -67,6 +68,7 @@ func main() {
 	cfg.Tunnel.TCPOnly = *tcpOnly
 	cfg.Clipboard = !*noClip
 	cfg.Verbose = *verbose
+	cfg.Demo = *demo
 
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)

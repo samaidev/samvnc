@@ -121,8 +121,10 @@ func (t *Tunnel) pump(r io.Reader, urlCh chan<- string) {
 		line := scan.Text()
 		t.logf("aitun> %s", line)
 		if !urlSent {
-			if strings.Contains(strings.ToLower(line), "proxy url") ||
-				strings.Contains(line, "aitun.cc/") {
+			lo := strings.ToLower(line)
+			if strings.Contains(lo, "proxy url") ||
+				strings.Contains(lo, "subdomain mode") ||
+				strings.Contains(line, "aitun.cc") {
 				if m := urlRE.FindString(line); m != "" {
 					select {
 					case urlCh <- m:
