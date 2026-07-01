@@ -128,38 +128,32 @@ func (i *xdotoolInjector) Key(ev protocol.KeyEvent) error {
 		return xdo(sub + " " + name)
 	}
 
-	// Non-modifier key.
-	if ev.Down {
-		// With modifiers held, use xdotool's combo syntax (e.g. "key ctrl+c"):
-		// it atomically presses the chord and releases it, which is the only
-		// reliable way to deliver Ctrl+C / Ctrl+V / Alt+Tab through xdotool.
-		if ev.Ctrl || ev.Alt || ev.Shift || ev.Meta {
-			chord := []string{}
-			if ev.Ctrl {
-				chord = append(chord, "ctrl")
-			}
-			if ev.Alt {
-				chord = append(chord, "alt")
-			}
-			if ev.Shift {
-				chord = append(chord, "shift")
-			}
-			if ev.Meta {
-				chord = append(chord, "super")
-			}
-			chord = append(chord, name)
-			return xdo("key " + strings.Join(chord, "+"))
-		}
-		// No modifiers: hold the key down (supports arrows, repeat, gaming).
-		return xdo("keydown " + name)
+	// Non-modifier key. Use xdotool's atomic "key" (press+release in one
+	// shot) on keydown, and do nothing on keyup. This is critical: the
+	// /poll transport is serial, so a keydown and its matching keyup often
+	// land in different batches separated by a network round-trip. If we
+	// used keydown/keyup separately, the key would stay held across that
+	// gap and X11's auto-repeat (default 500ms delay, 20/s) would fire,
+	// producing "sssssss" bursts. Atomic key presses and releases within a
+	// single xdotool call, so auto-repeat never gets a chance to trigger.
+	if !ev.Down {
+		return nil
 	}
-
-	// Key release. For a chord, xdotool `key` already released it, so only
-	// send keyup for plain held keys.
-	if !ev.Ctrl && !ev.Alt && !ev.Shift && !ev.Meta {
-		return xdo("keyup " + name)
+	chord := []string{}
+	if ev.Ctrl {
+		chord = append(chord, "ctrl")
 	}
-	return nil
+	if ev.Alt {
+		chord = append(chord, "alt")
+	}
+	if ev.Shift {
+		chord = append(chord, "shift")
+	}
+	if ev.Meta {
+		chord = append(chord, "super")
+	}
+	chord = append(chord, name)
+	return xdo("key " + strings.Join(chord, "+"))
 }
 
 // isModifier reports whether name is a modifier keysym that should be held via
