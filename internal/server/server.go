@@ -294,7 +294,11 @@ func (s *Session) handleText(data []byte) {
 		}
 	case protocol.ClipboardEvent:
 		if s.srv.cfg.Clipboard {
-			if err := s.clip.Write(m.Text); err != nil {
+			sel := clipboard.SelClipboard
+			if m.Selection == "primary" {
+				sel = clipboard.SelPrimary
+			}
+			if err := s.clip.Write(m.Text, sel); err != nil {
 				s.logf("clipboard write: %v", err)
 			}
 		}
@@ -380,7 +384,8 @@ func (s *Session) captureLoop() {
 }
 
 func (s *Session) clipboardLoop() {
-	last, _ := s.clip.Read()
+	lastClip, _ := s.clip.Read(clipboard.SelClipboard)
+	lastPrime, _ := s.clip.Read(clipboard.SelPrimary)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -389,15 +394,21 @@ func (s *Session) clipboardLoop() {
 			return
 		case <-ticker.C:
 		}
-		cur, err := s.clip.Read()
-		if err != nil || cur == last {
-			continue
+		if cur, err := s.clip.Read(clipboard.SelClipboard); err == nil && cur != lastClip {
+			lastClip = cur
+			b, _ := protocol.EncodeJSON(protocol.ClipboardEvent{Type: "clipboard", Text: cur, Selection: "clipboard"})
+			select {
+			case s.writeCh <- outMsg{mt: websocket.TextMessage, data: b}:
+			default:
+			}
 		}
-		last = cur
-		b, _ := protocol.EncodeJSON(protocol.ClipboardEvent{Type: "clipboard", Text: cur})
-		select {
-		case s.writeCh <- outMsg{mt: websocket.TextMessage, data: b}:
-		default:
+		if cur, err := s.clip.Read(clipboard.SelPrimary); err == nil && cur != lastPrime {
+			lastPrime = cur
+			b, _ := protocol.EncodeJSON(protocol.ClipboardEvent{Type: "clipboard", Text: cur, Selection: "primary"})
+			select {
+			case s.writeCh <- outMsg{mt: websocket.TextMessage, data: b}:
+			default:
+			}
 		}
 	}
 }

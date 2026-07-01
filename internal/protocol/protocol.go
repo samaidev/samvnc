@@ -105,8 +105,18 @@ const (
 
 // ClipboardEvent carries shared clipboard contents.
 type ClipboardEvent struct {
-	Type string `json:"type"` // "clipboard"
-	Text string `json:"text"`
+	Type      string `json:"type"`      // "clipboard"
+	Text      string `json:"text"`
+	Selection string `json:"selection"` // "clipboard" (default) or "primary"
+}
+
+// ClipboardRequest asks the server to return the current remote clipboard
+// contents immediately (used by the browser on Ctrl+V: pull remote clip, write
+// it to the local clipboard, then inject the Ctrl+V so the remote app pastes
+// its own just-read content). Selection mirrors ClipboardEvent.Selection.
+type ClipboardRequest struct {
+	Type      string `json:"type"` // "clipboard_request"
+	Selection string `json:"selection"`
 }
 
 // QualityChange dynamically switches quality mid-session.
@@ -287,6 +297,10 @@ func DecodeClientMessage(data []byte) (any, error) {
 		return m, err
 	case "clipboard":
 		var m ClipboardEvent
+		err := json.Unmarshal(data, &m)
+		return m, err
+	case "clipboard_request":
+		var m ClipboardRequest
 		err := json.Unmarshal(data, &m)
 		return m, err
 	case "quality":

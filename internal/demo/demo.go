@@ -21,6 +21,7 @@ import (
 	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
 
+	"github.com/samaidev/samvnc/internal/clipboard"
 	"github.com/samaidev/samvnc/internal/protocol"
 )
 
@@ -154,13 +155,14 @@ func NewManager() *Manager { return &Manager{s: defaultState} }
 func (*Manager) Name() string          { return "demo" }
 func (*Manager) Close() error          { return nil }
 
-func (m *Manager) Read() (string, error) {
+func (m *Manager) Read(sel clipboard.Selection) (string, error) {
 	m.s.mu.Lock()
 	defer m.s.mu.Unlock()
+	// Demo keeps a single clip; PRIMARY reads return the same.
 	return m.s.clip, nil
 }
 
-func (m *Manager) Write(text string) error {
+func (m *Manager) Write(text string, sel clipboard.Selection) error {
 	m.s.mu.Lock()
 	defer m.s.mu.Unlock()
 	m.s.clip = text

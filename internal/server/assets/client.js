@@ -131,10 +131,17 @@
     inputQueue = [];
     let resp;
     try {
+      // If a paste is pending, ask the server to echo the remote clipboard
+      // selection in this round so we can sync the local clipboard before
+      // injecting Ctrl+V.
+      const body = { seq: lastSeq, inputs: batch };
+      if (pendingPaste) {
+        body.clip_req = pendingPasteSel;
+      }
       const r = await fetch(prefix() + "/poll", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ seq: lastSeq, inputs: batch }),
+        body: JSON.stringify(body),
         keepalive: true,
         cache: "no-store",
       });
@@ -159,8 +166,19 @@
       const bin = base64ToBytes(resp.frame);
       if (bin) { parseFrame(bin); fpsCount++; }
     }
+    // Clipboard sync. If a paste was pending, this round's clip is the
+    // requested selection — write it local and inject Ctrl+V. Otherwise it
+    // is a steady-state CLIPBOARD push from the remote.
     if (resp.clip !== undefined && resp.clip !== null) {
-      handleText({ type: "clipboard", text: resp.clip });
+      if (pendingPaste && (!resp.clip_sel || resp.clip_sel === pendingPasteSel)) {
+        pendingPaste = false;
+        writeLocalAndPaste(resp.clip);
+      } else {
+        handleText({ type: "clipboard", text: resp.clip, selection: resp.clip_sel || "clipboard" });
+      }
+    }
+    if (resp.clip_prime !== undefined && resp.clip_prime !== null && resp.clip_prime !== "") {
+      handleText({ type: "clipboard", text: resp.clip_prime, selection: "primary" });
     }
     if (resp.stats) handleText(resp.stats);
     if (resp.error) { showOverlay("Session error", resp.error); }
@@ -242,10 +260,26 @@
         clipBar.classList.remove("hidden");
         break;
       case "clipboard":
-        if (clipText.value !== msg.text) {
-          clipText.value = msg.text;
-          if (navigator.clipboard && document.hasFocus()) {
-            navigator.clipboard.writeText(msg.text).catch(function () {});
+        // WS mode: a clipboard event may be the reply to a paste request.
+        // Poll mode handles paste replies inline in pollLoop, so this only
+        // fires for WS-mode clipboard_request responses and server pushes.
+        if (!usePoll && pendingPaste && (msg.selection || "clipboard") === pendingPasteSel) {
+          pendingPaste = false;
+          writeLocalAndPaste(msg.text);
+          break;
+        }
+        if (msg.selection === "primary") {
+          // PRIMARY (mouse-select) has no local equivalent; just mirror it
+          // into the clipboard textarea so the user can see/copy it.
+          if (clipText.value !== msg.text) clipText.value = msg.text;
+        } else {
+          // CLIPBOARD: mirror to the local system clipboard for seamless
+          // local paste.
+          if (clipText.value !== msg.text) {
+            clipText.value = msg.text;
+            if (navigator.clipboard) {
+              navigator.clipboard.writeText(msg.text).catch(function () {});
+            }
           }
         }
         break;
@@ -283,13 +317,110 @@
   // Listen on window (not canvas) so keys work without first clicking the
   // canvas, and so arrows/Ctrl+C are captured even when focus drifts. Skip
   // form fields so the clipboard textarea stays usable.
+  //
+  // Ctrl/Cmd+C and Ctrl/Cmd+V are intercepted for seamless clipboard sync:
+  //   - Copy: read the LOCAL clipboard and push it to the remote CLIPBOARD so
+  //     a subsequent paste in the remote desktop yields the local content.
+  //   - Paste: pull the REMOTE clipboard, write it to the LOCAL clipboard,
+  //     then inject Ctrl+V into the remote so the remote app pastes its own
+  //     (just-synced) CLIPBOARD. This avoids shipping the local clipboard to
+  //     the remote and back.
   function isFormField(el) {
     const tag = (el && el.tagName || "").toLowerCase();
     return tag === "input" || tag === "textarea" || tag === "select";
   }
 
+  function isCopyKey(e) {
+    return (e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "C") &&
+           !e.altKey && !e.shiftKey;
+  }
+  function isPasteKey(e) {
+    return (e.ctrlKey || e.metaKey) && (e.key === "v" || e.key === "V") &&
+           !e.altKey && !e.shiftKey;
+  }
+  function isCutKey(e) {
+    return (e.ctrlKey || e.metaKey) && (e.key === "x" || e.key === "X") &&
+           !e.altKey && !e.shiftKey;
+  }
+
+  // Push local clipboard -> remote. Used on copy/cut intercept.
+  function pushLocalClipboardToRemote(sel) {
+    if (!navigator.clipboard) return;
+    navigator.clipboard.readText().then(function (t) {
+      if (t !== null && t !== undefined) {
+        sendJSON({ type: "clipboard", text: t, selection: sel || "clipboard" });
+      }
+    }).catch(function () {});
+  }
+
+  // Pull remote clipboard -> local, then inject Ctrl+V into the remote.
+  // Poll mode: set pendingPaste so the next /poll carries clip_req; when the
+  // response arrives, writeLocalAndPaste() is called. WS mode: send a
+  // clipboard_request; the clipboard event handler calls writeLocalAndPaste().
+  let pendingPaste = false;
+  let pendingPasteSel = "clipboard";
+
+  function requestRemotePaste(sel) {
+    pendingPaste = true;
+    pendingPasteSel = sel || "clipboard";
+    if (!usePoll) {
+      // WS mode: ask the server for the selection; reply arrives as a
+      // clipboard event handled in handleText().
+      sendJSON({ type: "clipboard_request", selection: pendingPasteSel });
+    }
+    // Poll mode: the next pollLoop iteration will include clip_req.
+  }
+
+  function writeLocalAndPaste(text) {
+    // Write remote content to the local clipboard so a quick local paste
+    // also works, then inject Ctrl+V into the remote desktop.
+    const done = function () {
+      // Inject Ctrl+V into the remote: press ctrl, press v, release v,
+      // release ctrl. Non-modifier 'v' uses atomic key on keydown.
+      sendJSON({ type: "key", key: "Control", code: "ControlLeft", down: true,
+                 repeat: false, ctrl: true, alt: false, shift: false, meta: false });
+      sendJSON({ type: "key", key: "v", code: "KeyV", down: true,
+                 repeat: false, ctrl: true, alt: false, shift: false, meta: false });
+      sendJSON({ type: "key", key: "v", code: "KeyV", down: false,
+                 repeat: false, ctrl: true, alt: false, shift: false, meta: false });
+      sendJSON({ type: "key", key: "Control", code: "ControlLeft", down: false,
+                 repeat: false, ctrl: false, alt: false, shift: false, meta: false });
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text || "").then(done).catch(done);
+    } else {
+      done();
+    }
+  }
+
   window.addEventListener("keydown", function (e) {
     if (isFormField(e.target)) return;
+    // Intercept copy/cut/paste for seamless clipboard sync.
+    if (isCopyKey(e) || isCutKey(e)) {
+      e.preventDefault();
+      if (e.repeat) return;
+      pushLocalClipboardToRemote("clipboard");
+      // For cut, also send Ctrl+X to the remote so the remote app cuts its
+      // selection (the clipboard push above keeps the remote CLIPBOARD in
+      // sync with what the user just copied locally).
+      if (isCutKey(e)) {
+        sendJSON({ type: "key", key: "Control", code: "ControlLeft", down: true,
+                   repeat: false, ctrl: true, alt: false, shift: false, meta: false });
+        sendJSON({ type: "key", key: "x", code: "KeyX", down: true,
+                   repeat: false, ctrl: true, alt: false, shift: false, meta: false });
+        sendJSON({ type: "key", key: "x", code: "KeyX", down: false,
+                   repeat: false, ctrl: true, alt: false, shift: false, meta: false });
+        sendJSON({ type: "key", key: "Control", code: "ControlLeft", down: false,
+                   repeat: false, ctrl: false, alt: false, shift: false, meta: false });
+      }
+      return;
+    }
+    if (isPasteKey(e)) {
+      e.preventDefault();
+      if (e.repeat) return;
+      requestRemotePaste("clipboard");
+      return;
+    }
     e.preventDefault();
     // Drop OS auto-repeat keydowns: xdotool keydown sends an XKeyPress each
     // call, and X11 treats every XKeyPress as a typed character, so letting
@@ -303,6 +434,13 @@
   });
   window.addEventListener("keyup", function (e) {
     if (isFormField(e.target)) return;
+    // Don't forward keyup for copy/cut/paste keys we already intercepted on
+    // keydown: the remote Ctrl state was managed inside the intercept and a
+    // stray keyup would release a modifier that was never pressed remotely.
+    if (isCopyKey(e) || isPasteKey(e) || isCutKey(e)) {
+      e.preventDefault();
+      return;
+    }
     e.preventDefault();
     sendJSON({
       type: "key", key: e.key, code: e.code, down: false, repeat: false,
@@ -366,15 +504,20 @@
     sendJSON({ type: "mouse", x: 0, y: 0, mask: mouseMask, wheel: 0 });
   }, { passive: false });
 
-  // ---- Clipboard -----------------------------------------------------------
+  // ---- Clipboard (manual fallback) ----------------------------------------
+  // Copy/paste is normally seamless via the Ctrl+C/V intercepts above. This
+  // button stays as a manual fallback for environments where the Clipboard
+  // API is denied (e.g. non-HTTPS, no user gesture).
   clipSend.addEventListener("click", function () {
-    sendJSON({ type: "clipboard", text: clipText.value });
+    sendJSON({ type: "clipboard", text: clipText.value, selection: "clipboard" });
   });
   window.addEventListener("focus", function () {
+    // On regaining focus, push the local clipboard to the remote so a copy
+    // done while the tab was unfocused is not lost.
     if (navigator.clipboard) {
       navigator.clipboard.readText().then(function (t) {
         if (t && t !== clipText.value) {
-          sendJSON({ type: "clipboard", text: t });
+          sendJSON({ type: "clipboard", text: t, selection: "clipboard" });
         }
       }).catch(function () {});
     }

@@ -34,7 +34,9 @@ func (*winClipboard) Name() string { return "windows-clipboard" }
 
 func (*winClipboard) Close() error { return nil }
 
-func (*winClipboard) Read() (string, error) {
+// Windows has no PRIMARY selection; map it to the clipboard.
+func (*winClipboard) Read(sel Selection) (string, error) {
+	_ = sel
 	if r, _, _ := procOpenClipboard.Call(0); r == 0 {
 		return "", nil
 	}
@@ -54,7 +56,8 @@ func (*winClipboard) Read() (string, error) {
 	return s, nil
 }
 
-func (*winClipboard) Write(text string) error {
+func (*winClipboard) Write(text string, sel Selection) error {
+	_ = sel
 	utf16, _ := syscall.UTF16FromString(text)
 	size := len(utf16) * 2
 	h, _, _ := procGlobalAlloc.Call(gmemMoveable, uintptr(size))

@@ -213,22 +213,26 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 // pollReq is the body of a /poll request. Inputs is a batch of client->server
 // messages accumulated since the last poll, so input and frame transport share
 // a single connection (required by single-concurrency tunnels like aitun free).
+// ClipReq asks the server to echo the current remote clipboard in Clip.
 type pollReq struct {
-	Seq    int               `json:"seq"`
-	Inputs []json.RawMessage `json:"inputs"`
+	Seq     int               `json:"seq"`
+	Inputs  []json.RawMessage `json:"inputs"`
+	ClipReq string            `json:"clip_req,omitempty"` // "" | "clipboard" | "primary"
 }
 
 // pollResp carries one round-trip: the newest frame (if any), the hello_ack on
 // the first poll, current clipboard text, telemetry, and a pong if a ping was
 // in the batch.
 type pollResp struct {
-	Seq   int                `json:"seq"`
-	Ack   *protocol.HelloAck `json:"ack,omitempty"`
-	Frame string             `json:"frame,omitempty"` // base64(binHeader+payload)
-	Clip  string             `json:"clip,omitempty"`
-	Stats *protocol.Stats    `json:"stats,omitempty"`
-	Pong  *protocol.Pong     `json:"pong,omitempty"`
-	Error string             `json:"error,omitempty"`
+	Seq       int                `json:"seq"`
+	Ack       *protocol.HelloAck `json:"ack,omitempty"`
+	Frame     string             `json:"frame,omitempty"` // base64(binHeader+payload)
+	Clip      string             `json:"clip,omitempty"`
+	ClipSel   string             `json:"clip_sel,omitempty"` // selection of Clip
+	ClipPrime string             `json:"clip_prime,omitempty"` // current PRIMARY text
+	Stats     *protocol.Stats    `json:"stats,omitempty"`
+	Pong      *protocol.Pong     `json:"pong,omitempty"`
+	Error     string             `json:"error,omitempty"`
 }
 
 // handlePoll implements single-connection long polling. The browser POSTs its
@@ -303,8 +307,20 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		resp.Frame = base64.StdEncoding.EncodeToString(frame)
 	}
 	if s.cfg.Clipboard {
-		cur, _ := sess.clip.Read()
+		// If the client asked for a specific selection (Ctrl+V intercept),
+		// echo it back so the browser can sync its local clipboard before
+		// injecting the paste keystroke. Otherwise push the current
+		// CLIPBOARD (the normal steady-state sync) and PRIMARY (mouse-select).
+		sel := clipboard.SelClipboard
+		if req.ClipReq == "primary" {
+			sel = clipboard.SelPrimary
+		}
+		cur, _ := sess.clip.Read(sel)
 		resp.Clip = cur
+		resp.ClipSel = sel.String()
+		if prime, err := sess.clip.Read(clipboard.SelPrimary); err == nil {
+			resp.ClipPrime = prime
+		}
 	}
 	st := &protocol.Stats{Type: "stats", FPS: float64(sess.fps), Mode: sess.mode}
 	resp.Stats = st
@@ -446,8 +462,29 @@ func (h *HTTPSession) handleClientMessage(msg any) {
 		}
 	case protocol.ClipboardEvent:
 		if h.srv.cfg.Clipboard {
-			if err := h.clip.Write(m.Text); err != nil {
+			sel := clipboard.SelClipboard
+			if m.Selection == "primary" {
+				sel = clipboard.SelPrimary
+			}
+			if err := h.clip.Write(m.Text, sel); err != nil {
 				h.logf("clipboard write: %v", err)
+			}
+		}
+	case protocol.ClipboardRequest:
+		// SSE mode: reply with the requested selection as a clipboard event.
+		// (Poll mode handles this inline in handlePoll via ClipReq.)
+		if h.srv.cfg.Clipboard {
+			sel := clipboard.SelClipboard
+			if m.Selection == "primary" {
+				sel = clipboard.SelPrimary
+			}
+			cur, _ := h.clip.Read(sel)
+			b, _ := json.Marshal(protocol.ClipboardEvent{
+				Type: "clipboard", Text: cur, Selection: sel.String(),
+			})
+			select {
+			case h.writeCh <- sseMsg{event: "clipboard", data: b}:
+			default:
 			}
 		}
 	case protocol.QualityChange:
@@ -603,7 +640,8 @@ func (h *HTTPSession) captureLoop() {
 }
 
 func (h *HTTPSession) clipboardLoop() {
-	last, _ := h.clip.Read()
+	lastClip, _ := h.clip.Read(clipboard.SelClipboard)
+	lastPrime, _ := h.clip.Read(clipboard.SelPrimary)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -612,15 +650,27 @@ func (h *HTTPSession) clipboardLoop() {
 			return
 		case <-ticker.C:
 		}
-		cur, err := h.clip.Read()
-		if err != nil || cur == last {
-			continue
+		// CLIPBOARD (Ctrl+C/V).
+		if cur, err := h.clip.Read(clipboard.SelClipboard); err == nil && cur != lastClip {
+			lastClip = cur
+			b, _ := json.Marshal(protocol.ClipboardEvent{
+				Type: "clipboard", Text: cur, Selection: "clipboard",
+			})
+			select {
+			case h.writeCh <- sseMsg{event: "clipboard", data: b}:
+			default:
+			}
 		}
-		last = cur
-		b, _ := json.Marshal(protocol.ClipboardEvent{Type: "clipboard", Text: cur})
-		select {
-		case h.writeCh <- sseMsg{event: "clipboard", data: b}:
-		default:
+		// PRIMARY (mouse-select).
+		if cur, err := h.clip.Read(clipboard.SelPrimary); err == nil && cur != lastPrime {
+			lastPrime = cur
+			b, _ := json.Marshal(protocol.ClipboardEvent{
+				Type: "clipboard", Text: cur, Selection: "primary",
+			})
+			select {
+			case h.writeCh <- sseMsg{event: "clipboard", data: b}:
+			default:
+			}
 		}
 	}
 }
