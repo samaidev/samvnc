@@ -45,9 +45,14 @@ type HTTPSession struct {
 
 	// poll-mode state. captureLoop always refreshes latestFrame; a /poll
 	// request reads it. frameSig is a buffered-1 "new frame available" signal.
+	// qualGen is bumped on quality change; captureLoop stamps each produced
+	// frame with the current qualGen so a /poll can wait for a frame actually
+	// encoded at the new quality instead of a stale one racing in.
 	frameMu     sync.Mutex
 	latestFrame []byte // binHeader + payload
 	latestSeq   uint32
+	frameGen    uint64 // qualGen when this frame was encoded
+	qualGen     uint64 // bumped on quality change
 	frameSig    chan struct{}
 	lastPoll    time.Time
 	pollMode    bool
@@ -294,13 +299,15 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// waitFrame returns the newest frame with seq > afterSeq, or waits up to
-// timeout for one. If no newer frame arrives, returns (nil, currentSeq).
+// waitFrame returns the newest frame with seq > afterSeq AND encoded at the
+// current qualGen, or waits up to timeout for one. This prevents a quality
+// change from being masked by a stale frame still racing in from captureLoop.
 func (h *HTTPSession) waitFrame(afterSeq uint32, timeout time.Duration) ([]byte, uint32) {
 	deadline := time.Now().Add(timeout)
 	for {
 		h.frameMu.Lock()
-		if h.latestSeq > afterSeq {
+		wantGen := h.qualGen
+		if h.latestSeq > afterSeq && h.latestFrame != nil && h.frameGen == wantGen {
 			f := h.latestFrame
 			s := h.latestSeq
 			h.frameMu.Unlock()
@@ -435,6 +442,12 @@ func (h *HTTPSession) handleClientMessage(msg any) {
 			h.quality = m.Quality
 			h.enc.SetQuality(m.Quality)
 			h.logf("quality -> %d", m.Quality)
+			// Bump qualGen so waitFrame ignores frames encoded at the old
+			// quality that may still be racing in from captureLoop.
+			h.frameMu.Lock()
+			h.qualGen++
+			h.latestFrame = nil
+			h.frameMu.Unlock()
 		}
 	case protocol.Ping:
 		pong, _ := json.Marshal(protocol.Pong{Type: "pong", T: m.T, Ts: time.Now().UnixMilli()})
@@ -477,6 +490,7 @@ func (h *HTTPSession) writer() {
 
 func (h *HTTPSession) captureLoop() {
 	var seq uint32
+	var lastLoggedQ protocol.Quality = 255
 	frameDur := time.Second / time.Duration(max1(h.fps))
 	ticker := time.NewTicker(frameDur)
 	defer ticker.Stop()
@@ -507,10 +521,19 @@ func (h *HTTPSession) captureLoop() {
 			h.logf("capture: %v", err)
 			continue
 		}
+		// Snapshot qualGen before encoding so we can detect a quality change
+		// racing in during Encode and discard the stale-quality frame.
+		h.frameMu.Lock()
+		genBefore := h.qualGen
+		h.frameMu.Unlock()
 		payload, opt, err := h.enc.Encode(img)
 		if err != nil {
 			h.logf("encode: %v", err)
 			continue
+		}
+		if opt.Quality != lastLoggedQ {
+			h.logf("capture: quality=%d scale=%d format=%d payload=%dB", opt.Quality, opt.Scale, opt.Format, len(payload))
+			lastLoggedQ = opt.Quality
 		}
 		seq++
 		w := img.Bounds().Dx()
@@ -533,10 +556,15 @@ func (h *HTTPSession) captureLoop() {
 		_ = hdr.Encode(byteWriter(buf[:protocol.BinHeaderLen]))
 		copy(buf[protocol.BinHeaderLen:], payload)
 
-		// Refresh the latest-frame cache for /poll clients.
+		// Refresh the latest-frame cache for /poll clients. If quality changed
+		// during Encode (qualGen bumped), discard this stale-quality frame so
+		// waitFrame keeps waiting for one encoded at the new quality.
 		h.frameMu.Lock()
-		h.latestFrame = buf
-		h.latestSeq = seq
+		if h.qualGen == genBefore {
+			h.latestFrame = buf
+			h.latestSeq = seq
+			h.frameGen = genBefore
+		}
 		h.frameMu.Unlock()
 		select {
 		case h.frameSig <- struct{}{}:

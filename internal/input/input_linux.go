@@ -4,11 +4,15 @@ package input
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/samaidev/samvnc/internal/protocol"
 )
+
+// debugInput echoes every xdotool invocation to stderr when set (env SAMVNC_DEBUG_INPUT).
+var debugInput = os.Getenv("SAMVNC_DEBUG_INPUT") != ""
 
 // xdotoolInjector drives the X server through the `xdotool` command-line tool.
 //
@@ -89,16 +93,68 @@ func (i *xdotoolInjector) Key(ev protocol.KeyEvent) error {
 	if name == "" {
 		return nil
 	}
-	sub := "keydown"
-	if !ev.Down {
-		sub = "keyup"
+
+	// Modifier keys themselves: hold/release with keydown/keyup so later
+	// keys can stack on top, and so the X server's modifier state matches
+	// what the browser reports.
+	if isModifier(name) {
+		sub := "keydown"
+		if !ev.Down {
+			sub = "keyup"
+		}
+		return xdo(sub + " " + name)
 	}
-	// Hold modifiers by prefixing; xdotool understands combos for keydown.
-	return xdo(fmt.Sprintf("%s %s", sub, name))
+
+	// Non-modifier key.
+	if ev.Down {
+		// With modifiers held, use xdotool's combo syntax (e.g. "key ctrl+c"):
+		// it atomically presses the chord and releases it, which is the only
+		// reliable way to deliver Ctrl+C / Ctrl+V / Alt+Tab through xdotool.
+		if ev.Ctrl || ev.Alt || ev.Shift || ev.Meta {
+			chord := []string{}
+			if ev.Ctrl {
+				chord = append(chord, "ctrl")
+			}
+			if ev.Alt {
+				chord = append(chord, "alt")
+			}
+			if ev.Shift {
+				chord = append(chord, "shift")
+			}
+			if ev.Meta {
+				chord = append(chord, "super")
+			}
+			chord = append(chord, name)
+			return xdo("key " + strings.Join(chord, "+"))
+		}
+		// No modifiers: hold the key down (supports arrows, repeat, gaming).
+		return xdo("keydown " + name)
+	}
+
+	// Key release. For a chord, xdotool `key` already released it, so only
+	// send keyup for plain held keys.
+	if !ev.Ctrl && !ev.Alt && !ev.Shift && !ev.Meta {
+		return xdo("keyup " + name)
+	}
+	return nil
+}
+
+// isModifier reports whether name is a modifier keysym that should be held via
+// keydown rather than fired as a one-shot chord.
+func isModifier(name string) bool {
+	switch name {
+	case "Shift_L", "Shift_R", "Control_L", "Control_R",
+		"Alt_L", "Alt_R", "Super_L", "Super_R", "Caps_Lock":
+		return true
+	}
+	return false
 }
 
 // xdo runs `xdotool <args>` and returns any error.
 func xdo(args string) error {
+	if debugInput {
+		fmt.Fprintf(os.Stderr, "[input] xdotool %s\n", args)
+	}
 	parts := strings.Fields(args)
 	if len(parts) == 0 {
 		return nil

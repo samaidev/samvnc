@@ -280,14 +280,24 @@
   }
 
   // ---- Input: keyboard -----------------------------------------------------
-  canvas.addEventListener("keydown", function (e) {
+  // Listen on window (not canvas) so keys work without first clicking the
+  // canvas, and so arrows/Ctrl+C are captured even when focus drifts. Skip
+  // form fields so the clipboard textarea stays usable.
+  function isFormField(el) {
+    const tag = (el && el.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select";
+  }
+
+  window.addEventListener("keydown", function (e) {
+    if (isFormField(e.target)) return;
     e.preventDefault();
     sendJSON({
       type: "key", key: e.key, code: e.code, down: true, repeat: e.repeat,
       ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey,
     });
   });
-  canvas.addEventListener("keyup", function (e) {
+  window.addEventListener("keyup", function (e) {
+    if (isFormField(e.target)) return;
     e.preventDefault();
     sendJSON({
       type: "key", key: e.key, code: e.code, down: false, repeat: false,
