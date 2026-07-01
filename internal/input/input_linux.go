@@ -253,6 +253,32 @@ func xdotoolKeyName(code, key string) string {
 		return "F11"
 	case "F12":
 		return "F12"
+
+	// Punctuation / symbol keys. DOM codes for these are not "Key*"/"Digit*",
+	// so they must be mapped explicitly to xdotool keysym names; the literal
+	// key char (e.g. "-") is rejected by xdotool as an invalid key sequence.
+	case "Minus":
+		return "minus" // -
+	case "Equal":
+		return "equal" // =
+	case "BracketLeft":
+		return "bracketleft" // [
+	case "BracketRight":
+		return "bracketright" // ]
+	case "Backslash":
+		return "backslash" // \
+	case "Semicolon":
+		return "semicolon" // ;
+	case "Quote":
+		return "apostrophe" // '
+	case "Comma":
+		return "comma" // ,
+	case "Period":
+		return "period" // .
+	case "Slash":
+		return "slash" // /
+	case "Backquote":
+		return "grave" // `
 	}
 	// Letter / digit keys: DOM code "KeyA" -> "a", "Digit1" -> "1".
 	if len(code) >= 4 {
@@ -263,9 +289,21 @@ func xdotoolKeyName(code, key string) string {
 			return code[5:]
 		}
 	}
-	// Fallback to the literal key for printable single chars.
-	if len(key) == 1 {
-		return key
+	// Numpad keys: DOM code "Numpad0".."Numpad9", "NumpadEnter", etc.
+	if strings.HasPrefix(code, "Numpad") {
+		tail := code[6:]
+		switch tail {
+		case "Enter":
+			return "KP_Enter"
+		case "Add", "Subtract", "Multiply", "Divide":
+			return "KP_" + map[string]string{
+				"Add": "Add", "Subtract": "Subtract", "Multiply": "Multiply", "Divide": "Divide"}[tail]
+		case "Decimal":
+			return "KP_Decimal"
+		}
+		if len(tail) == 1 && tail[0] >= '0' && tail[0] <= '9' {
+			return "KP_" + tail
+		}
 	}
 	return ""
 }
