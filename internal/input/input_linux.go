@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/samaidev/samvnc/internal/protocol"
 )
@@ -21,13 +22,15 @@ var debugInput = os.Getenv("SAMVNC_DEBUG_INPUT") != ""
 // standard on X11 desktops and is packaged by every major distro.
 type xdotoolInjector struct {
 	mouseMask uint16 // last button mask, to emit clean press/release deltas
+	mu        sync.Mutex
+	held      map[string]bool // keyed by ev.Code; prevents repeat keydowns from producing duplicate characters
 }
 
 func newInjector() (Injector, error) {
 	if _, err := exec.LookPath("xdotool"); err != nil {
 		return nil, fmt.Errorf("input: xdotool not found in PATH (install it for keyboard/mouse injection): %w", err)
 	}
-	return &xdotoolInjector{}, nil
+	return &xdotoolInjector{held: map[string]bool{}}, nil
 }
 
 func (*xdotoolInjector) Name() string { return "linux-xdotool" }
@@ -93,6 +96,26 @@ func (i *xdotoolInjector) Key(ev protocol.KeyEvent) error {
 	if name == "" {
 		return nil
 	}
+
+	// Dedupe repeats: if a key is already held, ignore further keydowns so a
+	// browser OS auto-repeat (or a slow /poll batch replaying the same
+	// keydown N times) cannot produce "sssssss" bursts. xdotool keydown sends
+	// an XKeyPress each call and X11 treats each as a typed character.
+	i.mu.Lock()
+	if ev.Down {
+		if i.held[ev.Code] {
+			i.mu.Unlock()
+			return nil
+		}
+		i.held[ev.Code] = true
+	} else {
+		if !i.held[ev.Code] {
+			i.mu.Unlock()
+			return nil
+		}
+		delete(i.held, ev.Code)
+	}
+	i.mu.Unlock()
 
 	// Modifier keys themselves: hold/release with keydown/keyup so later
 	// keys can stack on top, and so the X server's modifier state matches

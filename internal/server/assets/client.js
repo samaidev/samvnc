@@ -291,8 +291,13 @@
   window.addEventListener("keydown", function (e) {
     if (isFormField(e.target)) return;
     e.preventDefault();
+    // Drop OS auto-repeat keydowns: xdotool keydown sends an XKeyPress each
+    // call, and X11 treats every XKeyPress as a typed character, so letting
+    // browser repeats through produces "sssssss" bursts. Only the initial
+    // press + the final keyup are injected.
+    if (e.repeat) return;
     sendJSON({
-      type: "key", key: e.key, code: e.code, down: true, repeat: e.repeat,
+      type: "key", key: e.key, code: e.code, down: true, repeat: false,
       ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey,
     });
   });
