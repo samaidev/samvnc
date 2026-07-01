@@ -70,7 +70,7 @@ func Default() Config {
 	return Config{
 		ListenAddr:     "127.0.0.1:8090",
 		DefaultQuality: "medium",
-		MaxFPS:         30,
+		MaxFPS:         15,
 		Clipboard:      true,
 		Mode:           "auto",
 		Tunnel: TunnelConfig{

@@ -47,23 +47,27 @@ func (e *Encoder) Encode(src *image.RGBA) ([]byte, Options, error) {
 	jpegQual := 70
 	format := protocol.FormatJPEG
 
+	// Quality presets are tuned for aitun free tunnels where each poll round-
+	// trip can take several seconds: smaller frames matter far more than
+	// sharpness. Low aggressively downscales to 1/4 resolution + heavy JPEG;
+	// Medium keeps half resolution; High keeps native with light JPEG.
 	switch q {
 	case protocol.QualityLow:
-		scale = 2
-		jpegQual = 35
+		scale = 4
+		jpegQual = 25
 	case protocol.QualityMedium:
-		scale = 1
-		jpegQual = 60
+		scale = 2
+		jpegQual = 45
 	case protocol.QualityHigh:
 		scale = 1
-		jpegQual = 82
+		jpegQual = 70
 		// High quality uses PNG for small frames (sharp text), JPEG otherwise.
 		if src.Bounds().Dx()*src.Bounds().Dy() < 256*256 {
 			format = protocol.FormatPNG
 		}
 	default:
-		scale = 1
-		jpegQual = 60
+		scale = 2
+		jpegQual = 45
 	}
 
 	frame := src

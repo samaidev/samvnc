@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -56,6 +57,10 @@ type HTTPSession struct {
 	frameSig    chan struct{}
 	lastPoll    time.Time
 	pollMode    bool
+	// lastPayload/lastPayloadGen dedupe identical consecutive frames (static
+	// desktop) so /poll returns an empty frame instead of re-sending ~20KB.
+	lastPayload     []byte
+	lastPayloadGen  uint64
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -277,8 +282,16 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		sess.handleClientMessage(msg)
 	}
 
-	// Wait for a frame newer than the client's last seq, or time out.
-	frame, fseq := sess.waitFrame(uint32(req.Seq), 250*time.Millisecond)
+	// Wait for a frame newer than the client's last seq, or time out. The first
+	// poll (seq=0) waits longer so the browser gets an initial frame in the
+	// same round-trip as the hello_ack instead of a blank canvas. Subsequent
+	// polls use a shorter wait that covers one capture tick (~66ms @ 15fps)
+	// without padding latency on a slow tunnel.
+	waitTimeout := 120 * time.Millisecond
+	if req.Seq == 0 {
+		waitTimeout = 500 * time.Millisecond
+	}
+	frame, fseq := sess.waitFrame(uint32(req.Seq), waitTimeout)
 
 	resp := pollResp{Seq: int(fseq)}
 	if req.Seq == 0 {
@@ -531,6 +544,16 @@ func (h *HTTPSession) captureLoop() {
 			h.logf("encode: %v", err)
 			continue
 		}
+		// Skip frames whose encoded payload is identical to the previous one
+		// (desktop is static). This is the single biggest win on a slow tunnel:
+		// an unchanged 1280x800 desktop would otherwise re-send ~20KB every
+		// tick; with this, /poll returns an empty frame and the browser just
+		// re-displays what it already has.
+		if bytes.Equal(payload, h.lastPayload) && genBefore == h.lastPayloadGen {
+			continue
+		}
+		h.lastPayload = payload
+		h.lastPayloadGen = genBefore
 		if opt.Quality != lastLoggedQ {
 			h.logf("capture: quality=%d scale=%d format=%d payload=%dB", opt.Quality, opt.Scale, opt.Format, len(payload))
 			lastLoggedQ = opt.Quality
