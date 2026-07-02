@@ -302,6 +302,14 @@ func (i *xtestInjector) focusWindowUnderPointer(x, y int) {
 //     there's no auto-repeat burst risk.
 //   - Tracking "held" for non-modifiers causes stuck keys when a keyup is
 //     lost (e.g. xterm exits between keydown and keyup).
+//
+// MODIFIER CHORDS: when a non-modifier key event carries modifier flags
+// (ev.Ctrl/Alt/Shift/Meta = true), we inject the full chord atomically:
+// press all modifiers, press the main key, release the main key, release
+// all modifiers. This is what the Fn panel's sticky-modifier flow needs:
+// the browser sends a single {key:"c", ctrl:true} and the server expands
+// it into Ctrl-down, c-down, c-up, Ctrl-up. Without this, the modifier
+// flags were silently dropped and the remote saw only a bare keypress.
 func (i *xtestInjector) Key(ev protocol.KeyEvent) error {
         keycode := i.keycodeForEvent(ev)
         if keycode == 0 {
@@ -327,18 +335,89 @@ func (i *xtestInjector) Key(ev protocol.KeyEvent) error {
                         delete(i.held, ev.Code)
                 }
                 i.mu.Unlock()
+
+                type_ := byte(xproto.KeyPress)
+                if !ev.Down {
+                        type_ = byte(xproto.KeyRelease)
+                }
+                if debugInput {
+                        fmt.Fprintf(os.Stderr, "[input] XTEST key %s code=%d keysym-name=%s mod=true\n",
+                                map[bool]string{true: "down", false: "up"}[ev.Down], keycode, ev.Key)
+                }
+                return i.fakeKey(xproto.Keycode(keycode), type_)
         }
 
+        // Non-modifier key. If modifier flags are set, inject as an atomic
+        // chord (modifiers + key + release all in sequence).
+        hasMods := ev.Ctrl || ev.Alt || ev.Shift || ev.Meta
+        if hasMods && ev.Down {
+                return i.injectChord(keycode, ev.Ctrl, ev.Alt, ev.Shift, ev.Meta)
+        }
+
+        // Plain non-modifier key, no chord.
         type_ := byte(xproto.KeyPress)
         if !ev.Down {
                 type_ = byte(xproto.KeyRelease)
         }
-
         if debugInput {
-                fmt.Fprintf(os.Stderr, "[input] XTEST key %s code=%d keysym-name=%s mod=%v\n",
-                        map[bool]string{true: "down", false: "up"}[ev.Down], keycode, ev.Key, isMod)
+                fmt.Fprintf(os.Stderr, "[input] XTEST key %s code=%d keysym-name=%s mod=false\n",
+                        map[bool]string{true: "down", false: "up"}[ev.Down], keycode, ev.Key)
         }
         return i.fakeKey(xproto.Keycode(keycode), type_)
+}
+
+// injectChord presses the requested modifiers, then the main key, then
+// releases everything. This produces a true Ctrl+C / Alt+Tab / etc. on the
+// remote X server.
+func (i *xtestInjector) injectChord(keycode xproto.Keycode, ctrl, alt, shift, meta bool) error {
+        // Build the list of modifier keycodes to press.
+        var modKCs []xproto.Keycode
+        if ctrl {
+                if kc := i.keysymToKeycode(0xffe3); kc != 0 { // Control_L
+                        modKCs = append(modKCs, kc)
+                }
+        }
+        if alt {
+                if kc := i.keysymToKeycode(0xffe9); kc != 0 { // Alt_L
+                        modKCs = append(modKCs, kc)
+                }
+        }
+        if shift {
+                if kc := i.keysymToKeycode(0xffe1); kc != 0 { // Shift_L
+                        modKCs = append(modKCs, kc)
+                }
+        }
+        if meta {
+                if kc := i.keysymToKeycode(0xffeb); kc != 0 { // Super_L
+                        modKCs = append(modKCs, kc)
+                }
+        }
+
+        if debugInput {
+                fmt.Fprintf(os.Stderr, "[input] XTEST chord main=%d mods=%v (ctrl=%v alt=%v shift=%v meta=%v)\n",
+                        keycode, modKCs, ctrl, alt, shift, meta)
+        }
+
+        // Press all modifiers.
+        for _, kc := range modKCs {
+                if err := i.fakeKey(kc, xproto.KeyPress); err != nil {
+                        return err
+                }
+        }
+        // Press + release the main key.
+        if err := i.fakeKey(keycode, xproto.KeyPress); err != nil {
+                return err
+        }
+        if err := i.fakeKey(keycode, xproto.KeyRelease); err != nil {
+                return err
+        }
+        // Release all modifiers (in reverse order).
+        for j := len(modKCs) - 1; j >= 0; j-- {
+                if err := i.fakeKey(modKCs[j], xproto.KeyRelease); err != nil {
+                        return err
+                }
+        }
+        return nil
 }
 
 // keycodeForEvent maps a DOM KeyboardEvent (code + key) to an X keycode.
