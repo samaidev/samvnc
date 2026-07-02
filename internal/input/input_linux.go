@@ -131,15 +131,21 @@ func (i *xtestInjector) fakeMove(x, y int16) error {
 
 // Type injects an arbitrary Unicode string (including CJK characters).
 //
-// For ASCII characters (codepoints < 0x80), we use XTEST with the
-// standard keycode (fast, reliable).
+// For ASCII characters (< 0x80): XTEST with standard keycode (fast).
+// For non-ASCII (CJK/emoji/accented): use the clipboard paste method:
+//   1. Write text to X PRIMARY selection via xsel.
+//   2. XTEST middle-click (button 2) to paste at cursor.
+//   3. Restore original PRIMARY.
 //
-// For non-ASCII characters (CJK, accented letters, emoji), we use
-// XChangeKeyboardMapping to temporarily register a keycode for the
-// Unicode keysym (0x01000000 + codepoint), then XTEST to press/release
-// that keycode. This is the same mechanism xdotool uses internally,
-// but done directly via xgb — no external process, no locale dependency,
-// and works even when fcitx/ibus IME is not running.
+// This is the most reliable cross-application method for injecting
+// Unicode text on X11 without an IME. It works for ALL apps (terminals,
+// browsers, editors) because it uses the standard X selection mechanism
+// rather than keysym translation (which many apps ignore for non-Latin
+// characters).
+//
+// References:
+//   https://github.com/kovidgoyal/kitty/issues/1456
+//   https://github.com/jordansissel/xdotool/issues/154
 func (i *xtestInjector) Type(text string) error {
         if text == "" {
                 return nil
@@ -147,95 +153,72 @@ func (i *xtestInjector) Type(text string) error {
         if debugInput {
                 fmt.Fprintf(os.Stderr, "[input] Type %q\n", text)
         }
+
+        // Check if text is pure ASCII — if so, use fast XTEST per-key path.
+        allASCII := true
         for _, r := range text {
-                if r < 0x80 {
-                        // ASCII: use standard keycode lookup.
+                if r >= 0x80 {
+                        allASCII = false
+                        break
+                }
+        }
+
+        if allASCII {
+                // ASCII: use XTEST per-character (fast, no clipboard needed).
+                for _, r := range text {
                         keycode := i.keysymToKeycode(xproto.Keysym(r))
                         if keycode != 0 {
-                                if err := i.fakeKey(keycode, byte(xproto.KeyPress)); err != nil {
-                                        return err
-                                }
-                                if err := i.fakeKey(keycode, byte(xproto.KeyRelease)); err != nil {
-                                        return err
-                                }
-                                continue
+                                i.fakeKey(keycode, byte(xproto.KeyPress))
+                                i.fakeKey(keycode, byte(xproto.KeyRelease))
                         }
                 }
-                // Non-ASCII: use Unicode keysym via temporary keyboard mapping.
-                if err := i.typeUnicode(r); err != nil {
-                        if debugInput {
-                                fmt.Fprintf(os.Stderr, "[input] typeUnicode %U failed: %v\n", r, err)
-                        }
-                        // Fallback: try xdotool type for this single character.
-                        cmd := exec.Command("xdotool", "type", "--clearmodifiers", "--delay", "0", "--", string(r))
-                        if runErr := cmd.Run(); runErr != nil && debugInput {
-                                fmt.Fprintf(os.Stderr, "[input] xdotool type fallback failed: %v\n", runErr)
-                        }
-                }
+                return nil
         }
-        return nil
+
+        // Non-ASCII text: use clipboard + middle-click paste.
+        return i.typeViaClipboard(text)
 }
 
-// typeUnicode injects a single Unicode character via XChangeKeyboardMapping.
-//
-// X11 supports Unicode keysyms in the range 0x01000000-0x0110FFFF (the
-// Unicode codepoint ORed with 0x01000000). To inject such a keysym:
-//
-//  1. Find an unused keycode (we use the first keycode above maxKeyCode).
-//  2. Call XChangeKeyboardMapping to map that keycode to the Unicode keysym.
-//  3. XTEST KeyPress + KeyRelease on that keycode.
-//  4. The X server delivers the keysym to the focused window, which
-//     converts it to the corresponding Unicode character.
-//
-// This works for ALL Unicode characters (Chinese, Japanese, Korean,
-// emoji, etc.) without needing an IME.
-func (i *xtestInjector) typeUnicode(r rune) error {
-        keysym := xproto.Keysym(0x01000000) | xproto.Keysym(r)
+// typeViaClipboard writes text to X PRIMARY selection, simulates a
+// middle-click (button 2) to paste it at the current cursor position,
+// then restores the original PRIMARY content.
+func (i *xtestInjector) typeViaClipboard(text string) error {
+        // Save current PRIMARY selection.
+        oldPrimary, _ := exec.Command("xsel", "-o", "-p").Output()
 
-        // Find an unused keycode to temporarily map. We use the first keycode
-        // after the server's max — it won't conflict with physical keys.
-        setup := xproto.Setup(i.conn)
-        min := setup.MinKeycode
-        max := setup.MaxKeycode
-        // Use max+1 if possible, otherwise fall back to a high keycode that's
-        // unlikely to be used (e.g. 255).
-        keycode := max + 1
-        if keycode > 255 {
-                keycode = 255
-        }
-        if keycode < min {
-                keycode = min
+        // Write new text to PRIMARY.
+        cmd := exec.Command("xsel", "-i", "-p")
+        cmd.Stdin = strings.NewReader(text)
+        if err := cmd.Run(); err != nil {
+                if debugInput {
+                        fmt.Fprintf(os.Stderr, "[input] xsel write failed: %v, trying xclip\n", err)
+                }
+                // Fallback to xclip.
+                cmd2 := exec.Command("xclip", "-selection", "primary", "-i")
+                cmd2.Stdin = strings.NewReader(text)
+                if err2 := cmd2.Run(); err2 != nil {
+                        return fmt.Errorf("typeViaClipboard: write selection: %w", err2)
+                }
         }
 
-        // Map the keycode to our Unicode keysym.
-        // XChangeKeyboardMapping(firstKeycode, keysymsPerKeycode, keysyms)
-        cookie := xproto.ChangeKeyboardMappingChecked(
-                i.conn,
-                1,                          // count = 1 keycode
-                keycode,                    // firstKeycode
-                1,                          // keysymsPerKeycode
-                []uint32{uint32(keysym)},   // the keysym
-        )
-        if err := cookie.Check(); err != nil {
-                return fmt.Errorf("ChangeKeyboardMapping: %w", err)
+        // Small delay for the selection to take effect.
+        time.Sleep(20 * time.Millisecond)
+
+        // Middle-click paste: press + release button 2 at current mouse pos.
+        if err := i.fakeButton(2, byte(xproto.ButtonPress)); err != nil {
+                return fmt.Errorf("typeViaClipboard: middle press: %w", err)
+        }
+        if err := i.fakeButton(2, byte(xproto.ButtonRelease)); err != nil {
+                return fmt.Errorf("typeViaClipboard: middle release: %w", err)
         }
 
-        // Small delay to let X server process the mapping change.
-        // Without this, some X servers deliver the old keysym.
-        time.Sleep(10 * time.Millisecond)
-
-        // Press + release the keycode (atomic, no auto-repeat).
-        if err := xtest.FakeInputChecked(i.conn, byte(xproto.KeyPress), byte(keycode), 0, 0, 0, 0, 0).Check(); err != nil {
-                return fmt.Errorf("fake keypress: %w", err)
-        }
-        if err := xtest.FakeInputChecked(i.conn, byte(xproto.KeyRelease), byte(keycode), 0, 0, 0, 0, 0).Check(); err != nil {
-                return fmt.Errorf("fake keyrelease: %w", err)
-        }
-
-        // Restore the original mapping (clear the temporary keysym).
-        xproto.ChangeKeyboardMappingChecked(
-                i.conn, 1, keycode, 1, []uint32{0},
-        ).Check()
+        // Restore original PRIMARY after a short delay.
+        go func() {
+                time.Sleep(200 * time.Millisecond)
+                restore := exec.Command("xsel", "-i", "-p")
+                restore.Stdin = strings.NewReader(string(oldPrimary))
+                restore.Run()
+        }()
 
         return nil
 }
