@@ -152,12 +152,11 @@
     inputQueue = [];
     let resp;
     try {
-      // If a paste is pending, ask the server to echo the remote clipboard
-      // selection in this round so we can sync the local clipboard before
-      // injecting Ctrl+V.
+      // If a copy is pending, ask the server to echo the remote clipboard
+      // selection in this round so we can sync the local browser clipboard.
       const body = { seq: lastSeq, inputs: batch };
-      if (pendingPaste) {
-        body.clip_req = pendingPasteSel;
+      if (pendingCopy) {
+        body.clip_req = pendingCopySel;
       }
       const r = await fetch(prefix() + "/poll", {
         method: "POST",
@@ -187,13 +186,13 @@
       const bin = base64ToBytes(resp.frame);
       if (bin) { parseFrame(bin); fpsCount++; }
     }
-    // Clipboard sync. If a paste was pending, this round's clip is the
-    // requested selection — write it local and inject Ctrl+V. Otherwise it
-    // is a steady-state CLIPBOARD push from the remote.
+    // Clipboard sync. If a copy was pending, this round's clip is the
+    // requested selection — write it to the local browser clipboard.
+    // Otherwise it is a steady-state CLIPBOARD push from the remote.
     if (resp.clip !== undefined && resp.clip !== null) {
-      if (pendingPaste && (!resp.clip_sel || resp.clip_sel === pendingPasteSel)) {
-        pendingPaste = false;
-        writeLocalAndPaste(resp.clip);
+      if (pendingCopy && (!resp.clip_sel || resp.clip_sel === pendingCopySel)) {
+        pendingCopy = false;
+        copyRemoteToLocal(resp.clip);
       } else {
         handleText({ type: "clipboard", text: resp.clip, selection: resp.clip_sel || "clipboard" });
       }
@@ -281,27 +280,23 @@
         clipBar.classList.remove("hidden");
         break;
       case "clipboard":
-        // WS mode: a clipboard event may be the reply to a paste request.
-        // Poll mode handles paste replies inline in pollLoop, so this only
-        // fires for WS-mode clipboard_request responses and server pushes.
-        if (!usePoll && pendingPaste && (msg.selection || "clipboard") === pendingPasteSel) {
-          pendingPaste = false;
-          writeLocalAndPaste(msg.text);
+        // WS mode: a clipboard event may be the reply to a copy request
+        // (Ctrl+C intercept). Poll mode handles copy replies inline in
+        // pollLoop, so this only fires for WS-mode clipboard_request
+        // responses and server pushes.
+        if (!usePoll && pendingCopy && (msg.selection || "clipboard") === pendingCopySel) {
+          pendingCopy = false;
+          copyRemoteToLocal(msg.text);
           break;
         }
-        if (msg.selection === "primary") {
-          // PRIMARY (mouse-select) has no local equivalent; just mirror it
-          // into the clipboard textarea so the user can see/copy it.
-          if (clipText.value !== msg.text) clipText.value = msg.text;
-        } else {
-          // CLIPBOARD: mirror to the local system clipboard for seamless
-          // local paste.
-          if (clipText.value !== msg.text) {
-            clipText.value = msg.text;
-            if (navigator.clipboard) {
-              navigator.clipboard.writeText(msg.text).catch(function () {});
-            }
-          }
+        // Rules 1 & 2: remote CLIPBOARD or PRIMARY changed -> sync to local.
+        // Both selections update the local browser clipboard so the user
+        // can paste locally whatever was copied/selected in the remote.
+        if (clipText.value !== msg.text) {
+          clipText.value = msg.text;
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(msg.text || "").catch(function () {});
         }
         break;
       case "stats":
@@ -339,13 +334,28 @@
   // canvas, and so arrows/Ctrl+C are captured even when focus drifts. Skip
   // form fields so the clipboard textarea stays usable.
   //
-  // Ctrl/Cmd+C and Ctrl/Cmd+V are intercepted for seamless clipboard sync:
-  //   - Copy: read the LOCAL clipboard and push it to the remote CLIPBOARD so
-  //     a subsequent paste in the remote desktop yields the local content.
-  //   - Paste: pull the REMOTE clipboard, write it to the LOCAL clipboard,
-  //     then inject Ctrl+V into the remote so the remote app pastes its own
-  //     (just-synced) CLIPBOARD. This avoids shipping the local clipboard to
-  //     the remote and back.
+  // ---- Clipboard sync (revised design) -----------------------------------
+  //
+  // The remote X11 session has TWO selections:
+  //   - CLIPBOARD: explicit copy (Ctrl+C in most apps)
+  //   - PRIMARY:   mouse-select (auto-copied on selection)
+  //
+  // The local browser has ONE clipboard (navigator.clipboard).
+  //
+  // Sync rules:
+  //   1. Remote CLIPBOARD changes  -> write to local navigator.clipboard.
+  //   2. Remote PRIMARY   changes  -> also write to local navigator.clipboard
+  //      so the user can paste locally what they mouse-selected in the remote.
+  //   3. User presses Ctrl+C in the remote desktop:
+  //      Intent: COPY from remote. Ask server for remote CLIPBOARD, write to
+  //      local. (Does NOT push local -> remote.)
+  //   4. User presses Ctrl+V in the remote desktop:
+  //      Intent: PASTE local clipboard INTO remote. Read navigator.clipboard
+  //      and inject as `type` text. (Does NOT pull remote -> local first.)
+  //   5. User presses Ctrl+X: same as copy, but also inject Ctrl+X into the
+  //      remote so the remote app cuts its selection.
+  //   6. Window regains focus: push local clipboard -> remote CLIPBOARD so a
+  //      local copy done while the tab was unfocused is not lost.
   function isFormField(el) {
     const tag = (el && el.tagName || "").toLowerCase();
     return tag === "input" || tag === "textarea" || tag === "select";
@@ -364,53 +374,66 @@
            !e.altKey && !e.shiftKey;
   }
 
-  // Push local clipboard -> remote. Used on copy/cut intercept.
+  // Push local clipboard -> remote CLIPBOARD. Used when the window regains
+  // focus (rule 6).
   function pushLocalClipboardToRemote(sel) {
     if (!navigator.clipboard) return;
     navigator.clipboard.readText().then(function (t) {
-      if (t !== null && t !== undefined) {
+      if (t !== null && t !== undefined && t !== "") {
         sendJSON({ type: "clipboard", text: t, selection: sel || "clipboard" });
       }
     }).catch(function () {});
   }
 
-  // Pull remote clipboard -> local, then inject Ctrl+V into the remote.
-  // Poll mode: set pendingPaste so the next /poll carries clip_req; when the
-  // response arrives, writeLocalAndPaste() is called. WS mode: send a
-  // clipboard_request; the clipboard event handler calls writeLocalAndPaste().
-  let pendingPaste = false;
-  let pendingPasteSel = "clipboard";
+  // Pull remote clipboard -> local (rule 3). Used on Ctrl+C intercept.
+  // Poll mode: set pendingCopy so the next /poll carries clip_req; when the
+  // response arrives, copyRemoteToLocal() is called. WS mode: send a
+  // clipboard_request; the clipboard event handler calls copyRemoteToLocal().
+  let pendingCopy = false;
+  let pendingCopySel = "clipboard";
 
-  function requestRemotePaste(sel) {
-    pendingPaste = true;
-    pendingPasteSel = sel || "clipboard";
+  function requestRemoteCopy(sel) {
+    pendingCopy = true;
+    pendingCopySel = sel || "clipboard";
     if (!usePoll) {
-      // WS mode: ask the server for the selection; reply arrives as a
-      // clipboard event handled in handleText().
-      sendJSON({ type: "clipboard_request", selection: pendingPasteSel });
+      sendJSON({ type: "clipboard_request", selection: pendingCopySel });
     }
     // Poll mode: the next pollLoop iteration will include clip_req.
   }
 
-  function writeLocalAndPaste(text) {
-    // Write remote content to the local clipboard so a quick local paste
-    // also works, then inject the text directly into the remote desktop
-    // via `type` (xdotool type on the server). This works for ALL apps
-    // (xterm, xfce4-terminal, browsers, editors) regardless of whether
-    // they bind Ctrl+V to paste. The previous approach of injecting
-    // Ctrl+V failed because many X apps (xterm especially) don't bind
-    // Ctrl+V to paste by default.
-    const done = function () {
-      if (text) {
-        sendJSON({ type: "text", text: text });
-      }
-    };
+  // Write remote clipboard content to the local browser clipboard (rules 1,2,3).
+  function copyRemoteToLocal(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text || "").then(done).catch(done);
-    } else {
-      done();
+      navigator.clipboard.writeText(text || "").catch(function () {});
     }
+    // Also mirror into the visible clipboard textarea so the user can
+    // see / manually copy it if the Clipboard API is unavailable.
+    if (clipText.value !== (text || "")) clipText.value = text || "";
   }
+
+  // Paste local clipboard -> remote by injecting text via `type` (rule 4).
+  // Works for ALL apps (xterm, xfce4-terminal, editors) regardless of
+  // whether they bind Ctrl+V to paste.
+  function pasteLocalToRemote() {
+    if (!navigator.clipboard) {
+      if (clipText.value) sendJSON({ type: "text", text: clipText.value });
+      return;
+    }
+    navigator.clipboard.readText().then(function (t) {
+      if (t) sendJSON({ type: "text", text: t });
+    }).catch(function () {
+      // Clipboard API denied (e.g. non-HTTPS): fall back to the textarea.
+      if (clipText.value) sendJSON({ type: "text", text: clipText.value });
+    });
+  }
+
+  // Legacy aliases kept so any remaining references in pollLoop / handleText
+  // (which we may have missed during the refactor) still work. They map to
+  // the new direction-correct functions.
+  let pendingPaste = pendingCopy;       // alias
+  let pendingPasteSel = pendingCopySel; // alias
+  function requestRemotePaste(sel) { requestRemoteCopy(sel); }
+  function writeLocalAndPaste(text) { copyRemoteToLocal(text); }
 
   window.addEventListener("keydown", function (e) {
     if (isFormField(e.target)) return;
@@ -418,10 +441,25 @@
     if (isCopyKey(e) || isCutKey(e)) {
       e.preventDefault();
       if (e.repeat) return;
-      pushLocalClipboardToRemote("clipboard");
-      // For cut, also send Ctrl+X to the remote so the remote app cuts its
-      // selection (the clipboard push above keeps the remote CLIPBOARD in
-      // sync with what the user just copied locally).
+      // Rule 3/5: user wants to COPY from remote.
+      //
+      // We do NOT inject Ctrl+C into the remote because:
+      //   - In xterm/bash, Ctrl+C is SIGINT (interrupts the running command),
+      //     not copy. Injecting it would kill the user's shell session.
+      //   - In GTK apps (xfce4-terminal) Ctrl+C copies only if there's a text
+      //     selection; with no selection it does nothing or sends SIGINT.
+      //
+      // Instead we just pull the remote X11 CLIPBOARD into the local browser
+      // clipboard. For xterm, the user copies by mouse-selecting (which
+      // auto-updates PRIMARY); that's already synced to local by rule 2
+      // (handleText clipboard event with selection="primary"). So Ctrl+C
+      // here is mainly for GTK apps that already put their selection into
+      // X11 CLIPBOARD via their own Ctrl+C binding.
+      //
+      // For cut (Ctrl+X), we DO inject it because the user explicitly wants
+      // the remote app to cut — and apps that don't bind Ctrl+X will just
+      // ignore it (unlike Ctrl+C which can SIGINT).
+      requestRemoteCopy("clipboard");
       if (isCutKey(e)) {
         sendJSON({ type: "key", key: "Control", code: "ControlLeft", down: true,
                    repeat: false, ctrl: true, alt: false, shift: false, meta: false });
@@ -437,7 +475,8 @@
     if (isPasteKey(e)) {
       e.preventDefault();
       if (e.repeat) return;
-      requestRemotePaste("clipboard");
+      // Rule 4: user wants to PASTE local clipboard INTO remote.
+      pasteLocalToRemote();
       return;
     }
     e.preventDefault();
