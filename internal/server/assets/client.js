@@ -62,6 +62,11 @@
   let fpsTimer = null;
   let fpsCount = 0;
 
+  // Device class detection. Used to gate clipboard auto-sync: mobile IMEs
+  // (Sogou, Gboard, etc.) detect navigator.clipboard.writeText calls and
+  // spam "clipboard updated" popups that steal focus and break typing.
+  const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
+
   // Transport state.
   let ws = null;            // WebSocket mode
   let usePoll = false;      // selected transport
@@ -290,12 +295,16 @@
           break;
         }
         // Rules 1 & 2: remote CLIPBOARD or PRIMARY changed -> sync to local.
-        // Both selections update the local browser clipboard so the user
-        // can paste locally whatever was copied/selected in the remote.
+        // Always mirror into the visible clipboard textarea so the user can
+        // see / manually copy it. On DESKTOP browsers we also write to
+        // navigator.clipboard for seamless local paste. On MOBILE we skip
+        // the navigator.clipboard write because mobile IMEs (e.g. Sogou)
+        // detect clipboard changes and spam "clipboard updated" popups,
+        // which steal focus and break the backspace key.
         if (clipText.value !== msg.text) {
           clipText.value = msg.text;
         }
-        if (navigator.clipboard && navigator.clipboard.writeText) {
+        if (!isTouchDevice && navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(msg.text || "").catch(function () {});
         }
         break;
