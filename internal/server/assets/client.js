@@ -284,6 +284,9 @@
           console.log("SamVNC public URL:", msg.relay_url);
         }
         clipBar.classList.remove("hidden");
+        // Default to collapsed so it doesn't block the desktop taskbar.
+        // User clicks the "📋 Clipboard" tab to expand.
+        clipBar.classList.add("collapsed");
         break;
       case "clipboard":
         // WS mode: a clipboard event may be the reply to a copy request
@@ -660,6 +663,7 @@
   let pinchStartDist = 0;
   let pinchStartScale = 1.0;
   let twoFingerStartY = 0;
+  let twoFingerTapX = 0, twoFingerTapY = 0; // first-finger pos for two-finger right-click
 
   // Trackpad-mode cursor position (in desktop coordinates).
   let trackpadX = 0, trackpadY = 0;
@@ -746,6 +750,9 @@
       pinchStartDist = distance(ts[0], ts[1]);
       pinchStartScale = viewScale;
       twoFingerStartY = (ts[0].y + ts[1].y) / 2;
+      // Record first-finger position for two-finger right-click.
+      twoFingerTapX = ts[0].x;
+      twoFingerTapY = ts[0].y;
       // If fingers stay roughly stationary, treat as a two-finger tap (right
       // click). If they move vertically, treat as scroll. If they converge/
       // diverge, treat as pinch-zoom.
@@ -901,9 +908,9 @@
           sendMouse(c.x, c.y, mouseMask, 0);
         }
       } else if (gestureMode === "two-finger-pending") {
-        // Two-finger tap = right click at midpoint.
-        const t = e.changedTouches[0];
-        const c = desktopCoords(t.clientX, t.clientY);
+        // Two-finger tap = right click at the FIRST finger's position
+        // (where the user initially touched, not where fingers lifted).
+        const c = desktopCoords(twoFingerTapX, twoFingerTapY);
         doClick(4, c.x, c.y);
       } else if (gestureMode === "three-finger-pending") {
         // Three-finger tap = middle click.
@@ -924,6 +931,12 @@
       sendMouse(c.x, c.y, mouseMask, 0);
     } else if (e.targetTouches.length === 1 && gestureMode === "scroll") {
       gestureMode = "tap-pending";
+    } else if (e.targetTouches.length === 1 && gestureMode === "two-finger-pending") {
+      // One finger lifted from a two-finger tap — treat as right-click
+      // at the first finger's position, then switch to single-finger mode.
+      const c = desktopCoords(twoFingerTapX, twoFingerTapY);
+      doClick(4, c.x, c.y);
+      gestureMode = "none";
     }
   }, { passive: false });
 
@@ -946,6 +959,19 @@
   clipSend.addEventListener("click", function () {
     sendJSON({ type: "clipboard", text: clipText.value, selection: "clipboard" });
   });
+  // Clipboard bar collapse/expand: click ▼ to collapse, click the tab to expand.
+  const clipCollapse = document.getElementById("clipCollapse");
+  const clipTab = document.getElementById("clipTab");
+  if (clipCollapse) {
+    clipCollapse.addEventListener("click", function () {
+      clipBar.classList.add("collapsed");
+    });
+  }
+  if (clipTab) {
+    clipTab.addEventListener("click", function () {
+      clipBar.classList.remove("collapsed");
+    });
+  }
   window.addEventListener("focus", function () {
     // On regaining focus, push the local clipboard to the remote so a copy
     // done while the tab was unfocused is not lost.
