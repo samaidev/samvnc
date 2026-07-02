@@ -89,9 +89,13 @@
     <button id="zoomBtn" title="Zoom" aria-label="Zoom">⊕</button>
   </div>
 
-  <!-- Hidden input that receives soft-keyboard input. -->
-  <input id="kbInput" type="text" autocomplete="off" autocorrect="off"
-         autocapitalize="off" spellcheck="false" />
+  <!-- Hidden textarea that receives soft-keyboard input. We use a textarea
+       (not input) so it can hold newlines, which lets us detect Enter via
+       value-diffing. Mobile IMEs (Gboard, Sogou) often don't fire keydown
+       or beforeinput for Backspace/Enter, so we infer them from value
+       changes on the 'input' event. -->
+  <textarea id="kbInput" rows="1" autocomplete="off" autocorrect="off"
+            autocapitalize="off" spellcheck="false"></textarea>
 
   <!-- Function-key panel: sticky modifiers + common keys. -->
   <div id="fnPanel" class="hidden">

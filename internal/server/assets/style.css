@@ -244,7 +244,7 @@ button:active { background: #1f6feb; border-color: #388bfd; }
   touch-action: manipulation;
 }
 
-/* Hidden text input that hosts the soft keyboard. */
+/* Hidden textarea that hosts the soft keyboard. */
 #kbInput {
   position: fixed;
   left: 8px;
@@ -259,6 +259,12 @@ button:active { background: #1f6feb; border-color: #388bfd; }
   font-size: 16px; /* >=16px prevents iOS zoom-on-focus */
   z-index: 40;
   display: none;
+  resize: none;
+  height: 36px;
+  line-height: 20px;
+  /* Hide the caret / placeholder text visually — the user doesn't need to
+     see what's in the field, it's just a sink for IME events. */
+  caret-color: transparent;
 }
 #kbInput.visible { display: block; }
 

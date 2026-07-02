@@ -1099,87 +1099,127 @@
 
   // ---- Soft keyboard input (mobile) --------------------------------------
   //
-  // Mobile IMEs (Sogou, Gboard, iOS keyboard) don't reliably emit keydown
-  // for Backspace / Enter / Arrow keys — they intercept those for candidate
-  // navigation. The reliable signal is the `beforeinput` event, which
-  // carries an `inputType` describing the user's intent:
+  // THE PROBLEM: Mobile IMEs (Gboard, Sogou, iOS keyboard) do NOT reliably
+  // fire keydown or beforeinput for Backspace / Enter. Gboard in particular
+  // has a known bug where backspacing during autocomplete suggestion state
+  // fires neither event. This makes detecting these keys via standard DOM
+  // events impossible on Android Chrome.
   //
-  //   insertText           -> type the text into the remote
-  //   insertCompositionText -> IME composition (handled by compositionend)
-  //   deleteContentBackward -> Backspace
-  //   deleteContentForward  -> Delete (forward)
-  //   insertLineBreak       -> Enter (in a textarea)
-  //   insertParagraph       -> Enter (in a contenteditable)
+  // THE SOLUTION: Use a <textarea> and infer Backspace/Enter by diffing
+  // its value on every 'input' event. The 'input' event fires reliably on
+  // ALL browsers/IMEs because the textarea's value actually changes.
   //
-  // We also keep the keydown handler as a fallback for non-IME keyboards
-  // (physical Bluetooth keyboards) where keydown IS reliable.
+  //   - If newValue == oldValue minus its last char -> Backspace was pressed
+  //   - If newValue contains a newline              -> Enter was pressed
+  //   - Otherwise                                    -> the added text is typed
+  //
+  // We keep the textarea value mostly empty (clear after each event) so the
+  // diff stays simple. A single placeholder char is kept to prevent the IME
+  // from getting confused by an empty field (some IMEs reset composition
+  // state when the field becomes empty).
+  //
+  // For PHYSICAL keyboards (Bluetooth), keydown IS reliable, so we keep
+  // the keydown handler for arrow keys / Escape / Tab which can't be
+  // inferred from value diffs.
 
   let kbComposing = false;
+  let kbLastValue = "";   // last seen value of kbInput
+  const KB_PLACEHOLDER = "\u200b";  // zero-width space, keeps IME happy
+
+  // Reset to placeholder on focus.
+  function kbReset() {
+    kbInput.value = KB_PLACEHOLDER;
+    kbLastValue = KB_PLACEHOLDER;
+  }
+
   kbInput.addEventListener("compositionstart", function () { kbComposing = true; });
   kbInput.addEventListener("compositionend", function (e) {
     kbComposing = false;
-    const text = e.data || kbInput.value;
+    const text = e.data;
     if (text) sendJSON({ type: "text", text: text });
-    kbInput.value = "";
+    kbReset();
   });
 
-  // beforeinput: the mobile-friendly way to catch Backspace/Enter.
-  if ("onbeforeinput" in kbInput) {
-    kbInput.addEventListener("beforeinput", function (e) {
-      if (kbComposing) return; // let IME finish composition first
-      const t = e.inputType || "";
-      // Most browsers also fill e.data with the text being inserted.
-      if (t === "insertText") {
-        e.preventDefault();
-        if (e.data) sendJSON({ type: "text", text: e.data });
-        return;
-      }
-      if (t === "insertLineBreak" || t === "insertParagraph") {
-        e.preventDefault();
-        sendKeyTap("Enter", "Enter");
-        return;
-      }
-      if (t === "deleteContentBackward") {
-        e.preventDefault();
-        sendKeyTap("Backspace", "Backspace");
-        return;
-      }
-      if (t === "deleteContentForward") {
-        e.preventDefault();
-        sendKeyTap("Delete", "Delete");
-        return;
-      }
-      // Fall through: let the browser's default action update kbInput.value,
-      // then the 'input' handler below will sync any residual text.
-    });
-  }
-
-  // Non-IME input (physical keyboard, or IME that emits plain text):
-  // each inserted character is sent immediately and the field is cleared.
+  // The main input handler: diff the value to detect Backspace / Enter / text.
   kbInput.addEventListener("input", function (e) {
     if (kbComposing) return; // wait for compositionend
     const v = kbInput.value;
-    if (v) {
-      sendJSON({ type: "text", text: v });
-      kbInput.value = "";
+    const prev = kbLastValue;
+
+    // Case 1: newValue contains a newline -> Enter was pressed.
+    // Strip newlines, send Enter for each, keep the rest.
+    if (v.indexOf("\n") >= 0) {
+      const lines = v.split("\n");
+      // The text before the first newline might be newly typed text.
+      const before = lines[0];
+      if (before && before !== KB_PLACEHOLDER && before !== prev) {
+        // Send any new text that appeared before the Enter.
+        const added = before.length > prev.length
+          ? before.slice(prev.length)
+          : before;
+        if (added && added !== KB_PLACEHOLDER) {
+          sendJSON({ type: "text", text: added });
+        }
+      }
+      // Count newlines (each is an Enter).
+      const enterCount = v.split("\n").length - 1;
+      for (let i = 0; i < enterCount; i++) {
+        sendKeyTap("Enter", "Enter");
+      }
+      kbReset();
+      return;
     }
+
+    // Case 2: newValue is shorter than prev -> Backspace was pressed.
+    // Specifically, if prev was "X" and newValue is "" or just the
+    // placeholder, that's one Backspace. Handle multi-char deletion
+    // (user held Backspace) by counting the difference.
+    if (v.length < prev.length) {
+      const deleted = prev.length - v.length;
+      for (let i = 0; i < deleted; i++) {
+        sendKeyTap("Backspace", "Backspace");
+      }
+      kbReset();
+      return;
+    }
+
+    // Case 3: newValue is longer -> text was inserted.
+    if (v.length > prev.length) {
+      const added = v.slice(prev.length);
+      // Filter out the placeholder if it got duplicated.
+      const clean = added.replace(/\u200b/g, "");
+      if (clean) {
+        sendJSON({ type: "text", text: clean });
+      }
+      kbReset();
+      return;
+    }
+
+    // Case 4: same length, no change. Reset just in case.
+    if (v !== prev) kbReset();
   });
-  // Control keys from a PHYSICAL keyboard (Bluetooth). Mobile soft
-  // keyboards won't hit this path — they go through beforeinput above.
+
+  // Physical keyboard fallback (Bluetooth keyboards). Mobile soft keyboards
+  // won't hit this path reliably — they go through the input-diff path above.
   kbInput.addEventListener("keydown", function (e) {
     if (kbComposing) return; // let IME handle its own keys
     switch (e.key) {
-      case "Backspace":
-      case "Enter":
       case "Tab":
         e.preventDefault();
-        sendKeyTap(e.key, e.code);
+        sendKeyTap("Tab", "Tab");
         break;
       case "ArrowLeft": case "ArrowRight": case "ArrowUp": case "ArrowDown":
-      case "Escape":
         e.preventDefault();
         sendKeyTap(e.key, e.code);
         break;
+      case "Escape":
+        e.preventDefault();
+        sendKeyTap("Escape", "Escape");
+        break;
+      // Backspace and Enter are handled by the input-diff above; we don't
+      // also handle them here to avoid double-firing on physical keyboards.
+      // (Physical keyboard Backspace DOES change the value, so the diff
+      // catches it.)
     }
   });
   // Hide the input when it loses focus (IME dismissed).
@@ -1197,6 +1237,8 @@
     // focus must happen in the same user-gesture tick or mobile Safari
     // refuses to open the IME.
     kbInput.focus({ preventScroll: true });
+    // Initialize the placeholder so the diff logic has a baseline.
+    kbReset();
   });
   fnBtn.addEventListener("click", function () {
     kbInput.classList.remove("visible");
