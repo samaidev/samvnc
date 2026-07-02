@@ -1097,7 +1097,23 @@
   //      modifier (Ctrl/Alt/Shift/Super) to arm it; the next key tap is sent
   //      with that modifier state, then the modifier is cleared.
 
-  // Soft keyboard.
+  // ---- Soft keyboard input (mobile) --------------------------------------
+  //
+  // Mobile IMEs (Sogou, Gboard, iOS keyboard) don't reliably emit keydown
+  // for Backspace / Enter / Arrow keys — they intercept those for candidate
+  // navigation. The reliable signal is the `beforeinput` event, which
+  // carries an `inputType` describing the user's intent:
+  //
+  //   insertText           -> type the text into the remote
+  //   insertCompositionText -> IME composition (handled by compositionend)
+  //   deleteContentBackward -> Backspace
+  //   deleteContentForward  -> Delete (forward)
+  //   insertLineBreak       -> Enter (in a textarea)
+  //   insertParagraph       -> Enter (in a contenteditable)
+  //
+  // We also keep the keydown handler as a fallback for non-IME keyboards
+  // (physical Bluetooth keyboards) where keydown IS reliable.
+
   let kbComposing = false;
   kbInput.addEventListener("compositionstart", function () { kbComposing = true; });
   kbInput.addEventListener("compositionend", function (e) {
@@ -1106,8 +1122,40 @@
     if (text) sendJSON({ type: "text", text: text });
     kbInput.value = "";
   });
-  // Non-IME input: each inserted character is sent immediately and the field
-  // is cleared so it never accumulates (we only need it to host the IME).
+
+  // beforeinput: the mobile-friendly way to catch Backspace/Enter.
+  if ("onbeforeinput" in kbInput) {
+    kbInput.addEventListener("beforeinput", function (e) {
+      if (kbComposing) return; // let IME finish composition first
+      const t = e.inputType || "";
+      // Most browsers also fill e.data with the text being inserted.
+      if (t === "insertText") {
+        e.preventDefault();
+        if (e.data) sendJSON({ type: "text", text: e.data });
+        return;
+      }
+      if (t === "insertLineBreak" || t === "insertParagraph") {
+        e.preventDefault();
+        sendKeyTap("Enter", "Enter");
+        return;
+      }
+      if (t === "deleteContentBackward") {
+        e.preventDefault();
+        sendKeyTap("Backspace", "Backspace");
+        return;
+      }
+      if (t === "deleteContentForward") {
+        e.preventDefault();
+        sendKeyTap("Delete", "Delete");
+        return;
+      }
+      // Fall through: let the browser's default action update kbInput.value,
+      // then the 'input' handler below will sync any residual text.
+    });
+  }
+
+  // Non-IME input (physical keyboard, or IME that emits plain text):
+  // each inserted character is sent immediately and the field is cleared.
   kbInput.addEventListener("input", function (e) {
     if (kbComposing) return; // wait for compositionend
     const v = kbInput.value;
@@ -1116,7 +1164,8 @@
       kbInput.value = "";
     }
   });
-  // Control keys from the soft keyboard that are not text.
+  // Control keys from a PHYSICAL keyboard (Bluetooth). Mobile soft
+  // keyboards won't hit this path — they go through beforeinput above.
   kbInput.addEventListener("keydown", function (e) {
     if (kbComposing) return; // let IME handle its own keys
     switch (e.key) {
