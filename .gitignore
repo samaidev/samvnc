@@ -4,5 +4,12 @@
 *.test
 *.out
 .env
+.env.runtime
 /samvnc-server
 /samvnc-relay
+
+# Runtime state (PID files, logs, dbus address)
+*.pid
+*.addr
+logs/
+

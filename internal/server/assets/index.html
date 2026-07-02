@@ -2,15 +2,27 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.1, maximum-scale=10, user-scalable=yes, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#0d1117" />
   <title>SamVNC &mdash; Remote Desktop</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <!-- Compact top bar; collapses to a hamburger on narrow screens. -->
   <div id="topbar">
+    <button id="menuBtn" title="Menu" aria-label="Menu">≡</button>
     <div class="brand">SamVNC</div>
     <div class="status" id="status">connecting…</div>
     <div class="spacer"></div>
+    <span id="stats" class="stats"></span>
+    <button id="fsBtn" title="Fullscreen" aria-label="Fullscreen">⛶</button>
+  </div>
+
+  <!-- Dropdown menu for the less-frequently-used controls (Quality, Mode,
+       Clipboard). Hidden on wide screens where the inline controls remain. -->
+  <div id="menuPanel" class="hidden">
     <label class="ctl">Quality
       <select id="quality">
         <option value="1" selected>Low (fast)</option>
@@ -25,12 +37,39 @@
         <option value="2">Relay</option>
       </select>
     </label>
-    <button id="fsBtn" title="Fullscreen">Fullscreen</button>
-    <span id="stats" class="stats"></span>
+    <label class="ctl">Input
+      <select id="touchMode">
+        <option value="direct" selected>Direct touch</option>
+        <option value="trackpad">Trackpad (relative)</option>
+      </select>
+    </label>
+    <button id="clipBtn">Clipboard</button>
+    <button id="resetZoom">Reset zoom</button>
+  </div>
+
+  <!-- Inline controls for wide screens. -->
+  <div id="inlineControls" class="wide-only">
+    <label class="ctl">Quality
+      <select id="qualityInline">
+        <option value="1" selected>Low (fast)</option>
+        <option value="2">Medium</option>
+        <option value="3">High (sharp)</option>
+      </select>
+    </label>
+    <label class="ctl">Mode
+      <select id="modeInline">
+        <option value="0" selected>Auto</option>
+        <option value="1">P2P</option>
+        <option value="2">Relay</option>
+      </select>
+    </label>
   </div>
 
   <div id="stage">
     <canvas id="screen" tabindex="0"></canvas>
+    <!-- Virtual cursor used in trackpad mode. -->
+    <div id="cursor" class="hidden"></div>
+    <!-- Pinch-zoom wrapper: we transform the canvas inside this element. -->
     <div id="overlay" class="hidden">
       <div class="dialog">
         <h2 id="overlayTitle">Disconnected</h2>
@@ -38,17 +77,19 @@
         <button id="reconnect">Reconnect</button>
       </div>
     </div>
+    <!-- Floating zoom indicator (shown when zoomed). -->
+    <div id="zoomBadge" class="hidden"></div>
   </div>
 
-  <!-- Mobile toolbar: two buttons to summon the soft keyboard and the
-       function-key panel. Hidden on touch-less devices via CSS. -->
+  <!-- Mobile toolbar: visible on touch devices and narrow screens. -->
   <div id="mobileBar">
-    <button id="kbBtn" title="Keyboard">Keyboard</button>
-    <button id="fnBtn" title="Function keys">Fn</button>
+    <button id="kbBtn" title="Keyboard" aria-label="Keyboard">⌨</button>
+    <button id="fnBtn" title="Function keys" aria-label="Function keys">Fn</button>
+    <button id="mouseModeBtn" title="Mouse buttons" aria-label="Mouse buttons">🖱</button>
+    <button id="zoomBtn" title="Zoom" aria-label="Zoom">⊕</button>
   </div>
-  <!-- Hidden input that receives soft-keyboard input. It is focused on demand
-       so the mobile OS shows the IME; typed text is forwarded as a "text"
-       message and the field is cleared after each commit. -->
+
+  <!-- Hidden input that receives soft-keyboard input. -->
   <input id="kbInput" type="text" autocomplete="off" autocorrect="off"
          autocapitalize="off" spellcheck="false" />
 
@@ -65,8 +106,8 @@
       <button data-key="Escape" data-code="Escape">Esc</button>
       <button data-key="Tab" data-code="Tab">Tab</button>
       <button data-key="Backspace" data-code="Backspace">⌫</button>
-      <button data-key="Enter" data-code="Enter">Enter</button>
-      <button data-key="Space" data-code="Space">Space</button>
+      <button data-key="Enter" data-code="Enter">⏎</button>
+      <button data-key="Space" data-code="Space">␣</button>
     </div>
     <div class="fn-row">
       <button data-key="ArrowUp" data-code="ArrowUp">↑</button>
@@ -97,6 +138,23 @@
       <button data-key="F10" data-code="F10">F10</button>
       <button data-key="F11" data-code="F11">F11</button>
       <button data-key="F12" data-code="F12">F12</button>
+    </div>
+  </div>
+
+  <!-- Mouse-button chooser: tap to select active button (L/M/R) for the
+       next tap. Useful when remote app needs right-click frequently. -->
+  <div id="mousePanel" class="hidden">
+    <div class="mouse-row">
+      <button data-btn="1" class="active">Left</button>
+      <button data-btn="2">Middle</button>
+      <button data-btn="4">Right</button>
+    </div>
+    <div class="mouse-row">
+      <button id="mouseDrag">Drag lock: off</button>
+      <button id="mouseScroll">Scroll mode: off</button>
+    </div>
+    <div class="mouse-row">
+      <button class="mouse-close">✕</button>
     </div>
   </div>
 

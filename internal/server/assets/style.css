@@ -8,26 +8,39 @@ html, body {
   color: #e6edf3;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
+  touch-action: none;
 }
 
 #topbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
+  gap: 8px;
+  padding: 6px 10px;
   background: #161b22;
   border-bottom: 1px solid #30363d;
+  height: 42px;
+  /* Respect notches on iPhone. */
+  padding-top: max(6px, env(safe-area-inset-top));
 }
 
-.brand { font-weight: 700; letter-spacing: .5px; }
-.status { color: #8b949e; font-size: 13px; }
+#menuBtn {
+  display: none;
+  padding: 6px 10px;
+  font-size: 18px;
+  line-height: 1;
+}
+.brand { font-weight: 700; letter-spacing: .5px; font-size: 14px; }
+.status { color: #8b949e; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .spacer { flex: 1; }
 
 .ctl {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: 12px;
   color: #8b949e;
 }
 select, button {
@@ -35,22 +48,64 @@ select, button {
   color: #e6edf3;
   border: 1px solid #30363d;
   border-radius: 6px;
-  padding: 4px 8px;
+  padding: 6px 10px;
   font-size: 13px;
   cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  min-height: 28px;
 }
 button:hover { background: #30363d; }
+button:active { background: #1f6feb; border-color: #388bfd; }
 
-.stats { color: #58a6ff; font-size: 12px; min-width: 90px; }
+.stats { color: #58a6ff; font-size: 11px; min-width: 70px; text-align: right; }
+
+#inlineControls {
+  display: none;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Narrow / touch: show menuBtn, hide inline controls. */
+@media (max-width: 720px), (pointer: coarse) {
+  #menuBtn { display: inline-block; }
+  .brand { font-size: 13px; }
+  .status { font-size: 11px; }
+  #inlineControls { display: none !important; }
+}
+/* Wide / no-touch: show inline controls, hide menu button. */
+@media (min-width: 721px) and (pointer: fine) {
+  #inlineControls { display: inline-flex; }
+}
+
+#menuPanel {
+  position: absolute;
+  top: 42px;
+  right: 8px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 50;
+  min-width: 200px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+#menuPanel.hidden { display: none; }
+#menuPanel .ctl { font-size: 13px; }
 
 #stage {
   position: relative;
-  height: calc(100% - 49px);
+  flex: 1;
+  height: calc(100% - 42px);
   display: flex;
   align-items: center;
   justify-content: center;
   background: #000;
   overflow: hidden;
+  touch-action: none; /* we handle all gestures ourselves */
 }
 
 #screen {
@@ -60,6 +115,10 @@ button:hover { background: #30363d; }
   background: #000;
   box-shadow: 0 0 0 1px #30363d;
   cursor: default;
+  transform-origin: center center;
+  /* Smooth scaling for pinch-zoom. */
+  transition: transform 0.05s linear;
+  touch-action: none;
 }
 
 #overlay {
@@ -69,6 +128,7 @@ button:hover { background: #30363d; }
   display: flex;
   align-items: center;
   justify-content: center;
+  z-index: 100;
 }
 #overlay.hidden { display: none; }
 .dialog {
@@ -78,9 +138,55 @@ button:hover { background: #30363d; }
   padding: 24px 32px;
   text-align: center;
   min-width: 280px;
+  max-width: calc(100% - 32px);
 }
 .dialog h2 { margin: 0 0 8px; }
 .dialog p { margin: 0 0 16px; color: #8b949e; }
+
+/* Virtual cursor for trackpad mode + touch positional feedback. */
+#cursor {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: rgba(88, 166, 255, 0.4);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  z-index: 60;
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.6), 0 0 12px rgba(88,166,255,0.8);
+  transition: background 0.1s, border-color 0.1s, transform 0.05s;
+}
+#cursor::after {
+  content: "";
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 4px; height: 4px;
+  background: #fff;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+#cursor.hidden { display: none; }
+#cursor.pressed {
+  background: rgba(255, 110, 80, 0.7);
+  border-color: #ff6e50;
+  transform: translate(-50%, -50%) scale(1.2);
+}
+
+/* Zoom badge. */
+#zoomBadge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: rgba(31, 111, 235, 0.85);
+  color: #fff;
+  border-radius: 12px;
+  padding: 3px 10px;
+  font-size: 11px;
+  z-index: 50;
+  pointer-events: none;
+}
+#zoomBadge.hidden { display: none; }
 
 #clipboardBar {
   position: fixed;
@@ -91,9 +197,11 @@ button:hover { background: #30363d; }
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
+  padding-bottom: max(6px, env(safe-area-inset-bottom));
   background: #161b22;
   border-top: 1px solid #30363d;
   font-size: 12px;
+  z-index: 30;
 }
 #clipboardBar.hidden { display: none; }
 #clipText {
@@ -108,41 +216,39 @@ button:hover { background: #30363d; }
   height: 28px;
 }
 
-/* ---- Mobile keyboard / function-key panel ---- */
-/* The mobile bar is shown only on touch devices via a media+hover query. */
+/* ---- Mobile bar ---- */
 #mobileBar {
   display: none;
   position: fixed;
   bottom: 0;
   left: 0;
   right: 0;
-  gap: 8px;
-  padding: 6px 12px;
+  gap: 6px;
+  padding: 6px 10px;
+  padding-bottom: max(6px, env(safe-area-inset-bottom));
   background: #161b22;
   border-top: 1px solid #30363d;
   z-index: 30;
+  height: 52px;
 }
-/* Coarse pointer (touch) OR narrow viewport => show the mobile bar. */
 @media (pointer: coarse), (max-width: 720px) {
   #mobileBar { display: flex; }
-  /* The clipboard bar collides with the mobile bar on small screens; let the
-     mobile bar take priority and hide the clipboard bar there. */
   #clipboardBar { display: none !important; }
-  #stage { height: calc(100% - 49px - 48px); }
+  #stage { height: calc(100% - 42px - 52px); }
 }
 #mobileBar button {
   flex: 1;
-  padding: 10px 8px;
-  font-size: 14px;
+  padding: 10px 4px;
+  font-size: 20px;
+  min-height: 40px;
+  touch-action: manipulation;
 }
 
-/* Hidden text input that hosts the soft keyboard. Off-screen but focusable so
-   the mobile IME opens. It is moved on-screen only while focused to keep the
-   caret visible for IME composition. */
+/* Hidden text input that hosts the soft keyboard. */
 #kbInput {
   position: fixed;
   left: 8px;
-  bottom: 56px;
+  bottom: 60px;
   width: calc(100% - 16px);
   max-width: 480px;
   background: #0d1117;
@@ -161,13 +267,14 @@ button:hover { background: #30363d; }
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: 56px;
+  bottom: 60px;
   width: calc(100% - 16px);
   max-width: 520px;
   background: #161b22;
   border: 1px solid #30363d;
   border-radius: 10px;
   padding: 8px;
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
   z-index: 40;
   user-select: none;
 }
@@ -180,9 +287,10 @@ button:hover { background: #30363d; }
 .fn-row:last-child { margin-bottom: 0; }
 .fn-row button {
   flex: 1;
-  padding: 12px 4px;
+  padding: 14px 4px;
   font-size: 13px;
   min-width: 0;
+  min-height: 38px;
   touch-action: manipulation;
 }
 .fn-row button.active {
@@ -194,4 +302,56 @@ button:hover { background: #30363d; }
   flex: 0 0 auto;
   width: 40px;
   background: #21262d;
+}
+
+/* Mouse-button chooser panel. */
+#mousePanel {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 60px;
+  width: calc(100% - 16px);
+  max-width: 360px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 8px;
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  z-index: 40;
+}
+#mousePanel.hidden { display: none; }
+.mouse-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.mouse-row:last-child { margin-bottom: 0; }
+.mouse-row button {
+  flex: 1;
+  padding: 14px 4px;
+  font-size: 13px;
+  min-height: 40px;
+}
+.mouse-row button.active {
+  background: #1f6feb;
+  border-color: #388bfd;
+  color: #fff;
+}
+.mouse-row .mouse-close {
+  flex: 0 0 auto;
+  width: 40px;
+  background: #21262d;
+}
+
+/* Hide inline controls when shown on wide screen — they sit in the topbar
+   via flex. Use absolute positioning to put them on the right. */
+@media (min-width: 721px) and (pointer: fine) {
+  #inlineControls {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    z-index: 20;
+  }
+  /* Reserve room on the right of the topbar so the status doesn't overlap. */
+  #topbar { padding-right: 320px; }
 }
