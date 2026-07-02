@@ -41,21 +41,61 @@ type xtestInjector struct {
 }
 
 func newInjector() (Injector, error) {
+        inj := &xtestInjector{held: map[string]bool{}}
+        if err := inj.reconnect(); err != nil {
+                return nil, err
+        }
+        return inj, nil
+}
+
+// reconnect (re-)establishes the X server connection and re-inits XTEST.
+// Called on startup and whenever an injection call fails (the X server
+// may have been restarted by the base image's entrypoint, or the
+// connection may have timed out after a period of inactivity).
+func (i *xtestInjector) reconnect() error {
+        i.mu.Lock()
+        defer i.mu.Unlock()
+        if i.conn != nil {
+                i.conn.Close()
+                i.conn = nil
+        }
         conn, err := x.NewConn()
         if err != nil {
-                return nil, fmt.Errorf("input: x11 connect: %w (is DISPLAY set?)", err)
+                return fmt.Errorf("input: x11 reconnect: %w (is DISPLAY set?)", err)
         }
         if err := xtest.Init(conn); err != nil {
                 conn.Close()
-                return nil, fmt.Errorf("input: XTEST init: %w", err)
+                return fmt.Errorf("input: XTEST init: %w", err)
         }
         setup := xproto.Setup(conn)
-        root := setup.DefaultScreen(conn).Root
-        return &xtestInjector{
-                conn: conn,
-                root: root,
-                held: map[string]bool{},
-        }, nil
+        i.conn = conn
+        i.root = setup.DefaultScreen(conn).Root
+        // Clear held keys — the new X server doesn't know about any modifiers
+        // we thought were pressed on the old connection.
+        i.held = map[string]bool{}
+        if debugInput {
+                fmt.Fprintf(os.Stderr, "[input] X server reconnected OK\n")
+        }
+        return nil
+}
+
+// withReconnect runs an injection function; if it fails, reconnects to
+// the X server and retries once. This handles the case where the X
+// server was restarted (e.g. by the base entrypoint) or the connection
+// dropped after a period of inactivity.
+func (i *xtestInjector) withReconnect(fn func() error) error {
+        err := fn()
+        if err == nil {
+                return nil
+        }
+        if debugInput {
+                fmt.Fprintf(os.Stderr, "[input] injection failed (%v), reconnecting X...\n", err)
+        }
+        // Reconnect and retry once.
+        if rerr := i.reconnect(); rerr != nil {
+                return fmt.Errorf("input: reconnect failed: %w (original error: %v)", rerr, err)
+        }
+        return fn()
 }
 
 func (*xtestInjector) Name() string { return "linux-xtest" }
@@ -68,25 +108,24 @@ func (i *xtestInjector) Close() error {
 }
 
 // fakeKey sends a KeyPress or KeyRelease event for the given keycode.
-// type_ is xproto.KeyPress (2) or xproto.KeyRelease (3).
 func (i *xtestInjector) fakeKey(keycode xproto.Keycode, type_ byte) error {
-        // XTEST FakeInput: Type, Detail=keycode, Time=0 (server current),
-        // Root=0 (no root window needed for key events), RootX=0, RootY=0, Deviceid=0.
-        return xtest.FakeInputChecked(i.conn, type_, byte(keycode), 0, 0, 0, 0, 0).Check()
+        return i.withReconnect(func() error {
+                return xtest.FakeInputChecked(i.conn, type_, byte(keycode), 0, 0, 0, 0, 0).Check()
+        })
 }
 
-// fakeButton sends a ButtonPress or ButtonRelease event for the given
-// button number (1=left, 2=middle, 3=right, 4=wheel up, 5=wheel down,
-// 6=wheel left, 7=wheel right, 8=X1, 9=X2).
+// fakeButton sends a ButtonPress or ButtonRelease event.
 func (i *xtestInjector) fakeButton(button byte, type_ byte) error {
-        return xtest.FakeInputChecked(i.conn, type_, button, 0, 0, 0, 0, 0).Check()
+        return i.withReconnect(func() error {
+                return xtest.FakeInputChecked(i.conn, type_, button, 0, 0, 0, 0, 0).Check()
+        })
 }
 
 // fakeMove moves the pointer to (x, y) on the root window.
 func (i *xtestInjector) fakeMove(x, y int16) error {
-        // MotionNotify = 6. Detail=0 (no button implied).
-        // Root must be set so the server knows which screen.
-        return xtest.FakeInputChecked(i.conn, 6, 0, 0, i.root, x, y, 0).Check()
+        return i.withReconnect(func() error {
+                return xtest.FakeInputChecked(i.conn, 6, 0, 0, i.root, x, y, 0).Check()
+        })
 }
 
 // Type injects an arbitrary Unicode string. We use xdotool for this
