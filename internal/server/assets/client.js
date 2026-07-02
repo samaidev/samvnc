@@ -581,7 +581,7 @@
       if (cursorHideTimer) clearTimeout(cursorHideTimer);
       cursorHideTimer = setTimeout(function () {
         cursor.classList.add("hidden");
-      }, 350);
+      }, 700);
     } else {
       // Real mouse: hide our cursor, the OS cursor is enough.
       cursor.classList.add("hidden");
@@ -908,10 +908,10 @@
           sendMouse(c.x, c.y, mouseMask, 0);
         }
       } else if (gestureMode === "two-finger-pending") {
-        // Two-finger tap = right click at the FIRST finger's position
-        // (where the user initially touched, not where fingers lifted).
-        const c = desktopCoords(twoFingerTapX, twoFingerTapY);
-        doClick(4, c.x, c.y);
+        // Two-finger tap = right click at the cursor's current position
+        // (where the mouse pointer was last moved to), not at finger
+        // touch/lift position.
+        doClick(4, lastMouseX, lastMouseY);
       } else if (gestureMode === "three-finger-pending") {
         // Three-finger tap = middle click.
         const t = e.changedTouches[0];
@@ -932,10 +932,8 @@
     } else if (e.targetTouches.length === 1 && gestureMode === "scroll") {
       gestureMode = "tap-pending";
     } else if (e.targetTouches.length === 1 && gestureMode === "two-finger-pending") {
-      // One finger lifted from a two-finger tap — treat as right-click
-      // at the first finger's position, then switch to single-finger mode.
-      const c = desktopCoords(twoFingerTapX, twoFingerTapY);
-      doClick(4, c.x, c.y);
+      // One finger lifted from a two-finger tap — right-click at cursor pos.
+      doClick(4, lastMouseX, lastMouseY);
       gestureMode = "none";
     }
   }, { passive: false });
