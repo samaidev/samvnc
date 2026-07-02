@@ -253,9 +253,15 @@ func (i *xtestInjector) focusWindowUnderPointer(x, y int) {
         cookie := xproto.QueryPointer(i.conn, i.root)
         reply, err := cookie.Reply()
         if err != nil || reply == nil {
+                if debugInput {
+                        fmt.Fprintf(os.Stderr, "[input] focus: querypointer failed: %v\n", err)
+                }
                 return
         }
         child := reply.Child
+        if debugInput {
+                fmt.Fprintf(os.Stderr, "[input] focus: root child=0x%x at (%d,%d)\n", child, reply.WinX, reply.WinY)
+        }
         if child == 0 {
                 return
         }
@@ -266,37 +272,62 @@ func (i *xtestInjector) focusWindowUnderPointer(x, y int) {
                 if err != nil || sub == nil || sub.Child == 0 {
                         break
                 }
+                if debugInput {
+                        fmt.Fprintf(os.Stderr, "[input] focus: descend 0x%x -> 0x%x\n", child, sub.Child)
+                }
                 child = sub.Child
         }
         // Set input focus to that window. Use RevertToParent so focus returns
         // to the parent if the window is destroyed.
-        _ = xproto.SetInputFocusChecked(i.conn, xproto.InputFocusParent, child, xproto.TimeCurrentTime).Check()
+        if err := xproto.SetInputFocusChecked(i.conn, xproto.InputFocusParent, child, xproto.TimeCurrentTime).Check(); err != nil {
+                if debugInput {
+                        fmt.Fprintf(os.Stderr, "[input] focus: setinputfocus to 0x%x failed: %v\n", child, err)
+                }
+        } else if debugInput {
+                fmt.Fprintf(os.Stderr, "[input] focus: setinputfocus to 0x%x OK\n", child)
+        }
 }
 
-// Key injects a key press or release. Modifier keys are held across
-// keydown/keyup; non-modifier keys are sent as one-shot key presses on
-// keydown only (keyup is a no-op) to avoid auto-repeat bursts.
+// Key injects a key press or release.
+//
+// For modifier keys (Shift/Ctrl/Alt/Super): we track held state and use
+// keydown/keyup so modifier state persists across subsequent key presses.
+//
+// For non-modifier keys: we send a single KeyPress on keydown and a single
+// KeyRelease on keyup. We do NOT maintain held state for these because:
+//   - The /poll transport may batch a keydown without its matching keyup
+//     (they land in separate requests), and the browser's auto-repeat
+//     keydowns are already filtered upstream.
+//   - XTEST KeyPress + KeyRelease is atomic from the X server's POV, so
+//     there's no auto-repeat burst risk.
+//   - Tracking "held" for non-modifiers causes stuck keys when a keyup is
+//     lost (e.g. xterm exits between keydown and keyup).
 func (i *xtestInjector) Key(ev protocol.KeyEvent) error {
         keycode := i.keycodeForEvent(ev)
         if keycode == 0 {
                 return nil
         }
 
-        i.mu.Lock()
-        if ev.Down {
-                if i.held[ev.Code] {
-                        i.mu.Unlock()
-                        return nil
+        keysym := domToKeysym(ev.Code, ev.Key)
+        isMod := isModifierKeysym(keysym)
+
+        if isMod {
+                i.mu.Lock()
+                if ev.Down {
+                        if i.held[ev.Code] {
+                                i.mu.Unlock()
+                                return nil
+                        }
+                        i.held[ev.Code] = true
+                } else {
+                        if !i.held[ev.Code] {
+                                i.mu.Unlock()
+                                return nil
+                        }
+                        delete(i.held, ev.Code)
                 }
-                i.held[ev.Code] = true
-        } else {
-                if !i.held[ev.Code] {
-                        i.mu.Unlock()
-                        return nil
-                }
-                delete(i.held, ev.Code)
+                i.mu.Unlock()
         }
-        i.mu.Unlock()
 
         type_ := byte(xproto.KeyPress)
         if !ev.Down {
@@ -304,8 +335,8 @@ func (i *xtestInjector) Key(ev protocol.KeyEvent) error {
         }
 
         if debugInput {
-                fmt.Fprintf(os.Stderr, "[input] XTEST key %s code=%d keysym-name=%s\n",
-                        map[bool]string{true: "down", false: "up"}[ev.Down], keycode, ev.Key)
+                fmt.Fprintf(os.Stderr, "[input] XTEST key %s code=%d keysym-name=%s mod=%v\n",
+                        map[bool]string{true: "down", false: "up"}[ev.Down], keycode, ev.Key, isMod)
         }
         return i.fakeKey(xproto.Keycode(keycode), type_)
 }
