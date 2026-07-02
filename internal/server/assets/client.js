@@ -54,6 +54,7 @@
   const stage = document.getElementById("stage");
   const cursor = document.getElementById("cursor");
   const zoomBadge = document.getElementById("zoomBadge");
+  const modBadge = document.getElementById("modBadge");
 
   let desktopW = 0, desktopH = 0;
   let mouseMask = 0;
@@ -1189,7 +1190,18 @@
       // Filter out the placeholder if it got duplicated.
       const clean = added.replace(/\u200b/g, "");
       if (clean) {
-        sendJSON({ type: "text", text: clean });
+        // If sticky modifiers are armed (e.g. user tapped Ctrl in the Fn
+        // panel then closed it), send each character as a key chord with
+        // those modifiers, instead of as plain text. This lets the user
+        // type Ctrl+C / Ctrl+V / etc. from the soft keyboard after
+        // arming a modifier in the Fn panel.
+        if (hasStickyMods() && clean.length === 1) {
+          const c = clean.toLowerCase();
+          const code = "Key" + c.toUpperCase();
+          sendKeyTap(c, code);
+        } else {
+          sendJSON({ type: "text", text: clean });
+        }
       }
       kbReset();
       return;
@@ -1247,6 +1259,12 @@
   });
 
   // Function-key panel: sticky modifiers + key taps.
+  //
+  // Sticky modifiers PERSIST after the Fn panel closes, so the user can:
+  //   Fn → tap Ctrl → close Fn → type 'c' on soft keyboard → Ctrl+C is sent.
+  // The modifiers are cleared only when a non-modifier key is actually
+  // sent (in sendKeyTap or the text-input path). A small badge in the
+  // mobile bar shows the pending modifiers so the user remembers.
   let stickyMods = { ctrl: false, alt: false, shift: false, meta: false };
 
   function refreshModButtons() {
@@ -1255,11 +1273,32 @@
       if (stickyMods[b.dataset.mod]) b.classList.add("active");
       else b.classList.remove("active");
     });
+    refreshModBadge();
+  }
+
+  // Show a small badge in the mobile bar when sticky mods are armed, so the
+  // user knows the next key will be combined with a modifier.
+  function refreshModBadge() {
+    const labels = [];
+    if (stickyMods.ctrl) labels.push("Ctrl");
+    if (stickyMods.alt) labels.push("Alt");
+    if (stickyMods.shift) labels.push("Shift");
+    if (stickyMods.meta) labels.push("Super");
+    if (labels.length > 0) {
+      modBadge.textContent = labels.join("+");
+      modBadge.classList.remove("hidden");
+    } else {
+      modBadge.classList.add("hidden");
+    }
   }
 
   function clearStickyMods() {
     stickyMods = { ctrl: false, alt: false, shift: false, meta: false };
     refreshModButtons();
+  }
+
+  function hasStickyMods() {
+    return stickyMods.ctrl || stickyMods.alt || stickyMods.shift || stickyMods.meta;
   }
 
   // Modifier buttons toggle their sticky state.
@@ -1271,7 +1310,9 @@
   });
   fnPanel.querySelector(".fn-close").addEventListener("click", function () {
     fnPanel.classList.add("hidden");
-    clearStickyMods();
+    // NOTE: do NOT clear stickyMods here. The user may have armed a
+    // modifier and closed the panel to type on the soft keyboard. The
+    // modifiers will be consumed (and cleared) by the next key/text input.
   });
 
   // Send a key tap (keydown + keyup) carrying the current sticky modifiers,

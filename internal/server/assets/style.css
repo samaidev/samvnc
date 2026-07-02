@@ -244,6 +244,28 @@ button:active { background: #1f6feb; border-color: #388bfd; }
   touch-action: manipulation;
 }
 
+/* Sticky-modifier badge: shows pending Ctrl/Alt/Shift/Super after the Fn
+   panel closes, so the user knows the next key will be a chord. */
+#modBadge {
+  flex: 0 0 auto;
+  background: #1f6feb;
+  color: #fff;
+  border-radius: 12px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  align-self: center;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  animation: modBadgePulse 1.5s ease-in-out infinite;
+}
+#modBadge.hidden { display: none; }
+@keyframes modBadgePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 /* Hidden textarea that hosts the soft keyboard. */
 #kbInput {
   position: fixed;
