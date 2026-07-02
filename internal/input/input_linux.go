@@ -290,26 +290,26 @@ func (i *xtestInjector) focusWindowUnderPointer(x, y int) {
 
 // Key injects a key press or release.
 //
-// For modifier keys (Shift/Ctrl/Alt/Super): we track held state and use
-// keydown/keyup so modifier state persists across subsequent key presses.
+// MODIFIER KEYS (Shift/Ctrl/Alt/Super): tracked with held state, sent as
+// separate KeyPress (keydown) / KeyRelease (keyup) so modifier state
+// persists across subsequent key presses.
 //
-// For non-modifier keys: we send a single KeyPress on keydown and a single
-// KeyRelease on keyup. We do NOT maintain held state for these because:
-//   - The /poll transport may batch a keydown without its matching keyup
-//     (they land in separate requests), and the browser's auto-repeat
-//     keydowns are already filtered upstream.
-//   - XTEST KeyPress + KeyRelease is atomic from the X server's POV, so
-//     there's no auto-repeat burst risk.
-//   - Tracking "held" for non-modifiers causes stuck keys when a keyup is
-//     lost (e.g. xterm exits between keydown and keyup).
+// NON-MODIFIER KEYS: sent as an ATOMIC KeyPress+KeyRelease pair on
+// keydown ONLY. The keyup event is ignored. This is critical because:
 //
-// MODIFIER CHORDS: when a non-modifier key event carries modifier flags
-// (ev.Ctrl/Alt/Shift/Meta = true), we inject the full chord atomically:
-// press all modifiers, press the main key, release the main key, release
-// all modifiers. This is what the Fn panel's sticky-modifier flow needs:
-// the browser sends a single {key:"c", ctrl:true} and the server expands
-// it into Ctrl-down, c-down, c-up, Ctrl-up. Without this, the modifier
-// flags were silently dropped and the remote saw only a bare keypress.
+//   - The /poll transport sends keydown and keyup in SEPARATE HTTP
+//     requests, potentially hundreds of milliseconds apart.
+//   - X11 auto-repeat kicks in ~500ms after a KeyPress with no
+//     KeyRelease, generating 30+ duplicate KeyPress events per second.
+//   - This caused "niiiiiiiiiiihao" bursts when typing fast over a slow
+//     aitun relay connection.
+//
+// By sending KeyPress+KeyRelease back-to-back in the same Key() call,
+// the X server never sees a "held" key, so auto-repeat never triggers.
+//
+// MODIFIER CHORDS: when ev.Ctrl/Alt/Shift/Meta are set, we inject the
+// full chord atomically (modifiers down → key press+release → modifiers
+// up) in a single Key() call, also avoiding auto-repeat.
 func (i *xtestInjector) Key(ev protocol.KeyEvent) error {
         keycode := i.keycodeForEvent(ev)
         if keycode == 0 {
@@ -319,6 +319,7 @@ func (i *xtestInjector) Key(ev protocol.KeyEvent) error {
         keysym := domToKeysym(ev.Code, ev.Key)
         isMod := isModifierKeysym(keysym)
 
+        // ── Modifier keys: track held state, send press/release separately ──
         if isMod {
                 i.mu.Lock()
                 if ev.Down {
@@ -341,29 +342,32 @@ func (i *xtestInjector) Key(ev protocol.KeyEvent) error {
                         type_ = byte(xproto.KeyRelease)
                 }
                 if debugInput {
-                        fmt.Fprintf(os.Stderr, "[input] XTEST key %s code=%d keysym-name=%s mod=true\n",
-                                map[bool]string{true: "down", false: "up"}[ev.Down], keycode, ev.Key)
+                        fmt.Fprintf(os.Stderr, "[input] XTEST key %s code=%d mod=true\n",
+                                map[bool]string{true: "down", false: "up"}[ev.Down], keycode)
                 }
                 return i.fakeKey(xproto.Keycode(keycode), type_)
         }
 
-        // Non-modifier key. If modifier flags are set, inject as an atomic
-        // chord (modifiers + key + release all in sequence).
+        // ── Non-modifier keys: only act on keydown; ignore keyup ──
+        // The keyup was already handled by the atomic press+release below.
+        if !ev.Down {
+                return nil
+        }
+
+        // If modifier flags are set, inject as an atomic chord.
         hasMods := ev.Ctrl || ev.Alt || ev.Shift || ev.Meta
-        if hasMods && ev.Down {
+        if hasMods {
                 return i.injectChord(keycode, ev.Ctrl, ev.Alt, ev.Shift, ev.Meta)
         }
 
-        // Plain non-modifier key, no chord.
-        type_ := byte(xproto.KeyPress)
-        if !ev.Down {
-                type_ = byte(xproto.KeyRelease)
-        }
+        // Plain key: atomic KeyPress + KeyRelease (no auto-repeat risk).
         if debugInput {
-                fmt.Fprintf(os.Stderr, "[input] XTEST key %s code=%d keysym-name=%s mod=false\n",
-                        map[bool]string{true: "down", false: "up"}[ev.Down], keycode, ev.Key)
+                fmt.Fprintf(os.Stderr, "[input] XTEST key tap code=%d\n", keycode)
         }
-        return i.fakeKey(xproto.Keycode(keycode), type_)
+        if err := i.fakeKey(xproto.Keycode(keycode), byte(xproto.KeyPress)); err != nil {
+                return err
+        }
+        return i.fakeKey(xproto.Keycode(keycode), byte(xproto.KeyRelease))
 }
 
 // injectChord presses the requested modifiers, then the main key, then
