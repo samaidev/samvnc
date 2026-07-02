@@ -8,6 +8,7 @@ import (
         "os/exec"
         "strings"
         "sync"
+        "time"
 
         x "github.com/BurntSushi/xgb"
         "github.com/BurntSushi/xgb/xproto"
@@ -128,26 +129,114 @@ func (i *xtestInjector) fakeMove(x, y int16) error {
         })
 }
 
-// Type injects an arbitrary Unicode string. We use xdotool for this
-// because it correctly handles multi-byte / composed characters that
-// don't map to a single keycode.
+// Type injects an arbitrary Unicode string (including CJK characters).
+//
+// For ASCII characters (codepoints < 0x80), we use XTEST with the
+// standard keycode (fast, reliable).
+//
+// For non-ASCII characters (CJK, accented letters, emoji), we use
+// XChangeKeyboardMapping to temporarily register a keycode for the
+// Unicode keysym (0x01000000 + codepoint), then XTEST to press/release
+// that keycode. This is the same mechanism xdotool uses internally,
+// but done directly via xgb — no external process, no locale dependency,
+// and works even when fcitx/ibus IME is not running.
 func (i *xtestInjector) Type(text string) error {
         if text == "" {
                 return nil
         }
         if debugInput {
-                fmt.Fprintf(os.Stderr, "[input] xdotool type %q\n", text)
+                fmt.Fprintf(os.Stderr, "[input] Type %q\n", text)
         }
-        // If xdotool isn't available, fall back to per-character XTEST with
-        // keysym lookup. This works for ASCII but not for CJK.
-        if _, err := exec.LookPath("xdotool"); err != nil {
-                return i.typeViaXTEST(text)
+        for _, r := range text {
+                if r < 0x80 {
+                        // ASCII: use standard keycode lookup.
+                        keycode := i.keysymToKeycode(xproto.Keysym(r))
+                        if keycode != 0 {
+                                if err := i.fakeKey(keycode, byte(xproto.KeyPress)); err != nil {
+                                        return err
+                                }
+                                if err := i.fakeKey(keycode, byte(xproto.KeyRelease)); err != nil {
+                                        return err
+                                }
+                                continue
+                        }
+                }
+                // Non-ASCII: use Unicode keysym via temporary keyboard mapping.
+                if err := i.typeUnicode(r); err != nil {
+                        if debugInput {
+                                fmt.Fprintf(os.Stderr, "[input] typeUnicode %U failed: %v\n", r, err)
+                        }
+                        // Fallback: try xdotool type for this single character.
+                        cmd := exec.Command("xdotool", "type", "--clearmodifiers", "--delay", "0", "--", string(r))
+                        if runErr := cmd.Run(); runErr != nil && debugInput {
+                                fmt.Fprintf(os.Stderr, "[input] xdotool type fallback failed: %v\n", runErr)
+                        }
+                }
         }
-        cmd := exec.Command("xdotool", "type", "--clearmodifiers", "--delay", "0", "--", text)
-        out, err := cmd.CombinedOutput()
-        if err != nil {
-                return fmt.Errorf("xdotool type: %w (%s)", err, strings.TrimSpace(string(out)))
+        return nil
+}
+
+// typeUnicode injects a single Unicode character via XChangeKeyboardMapping.
+//
+// X11 supports Unicode keysyms in the range 0x01000000-0x0110FFFF (the
+// Unicode codepoint ORed with 0x01000000). To inject such a keysym:
+//
+//  1. Find an unused keycode (we use the first keycode above maxKeyCode).
+//  2. Call XChangeKeyboardMapping to map that keycode to the Unicode keysym.
+//  3. XTEST KeyPress + KeyRelease on that keycode.
+//  4. The X server delivers the keysym to the focused window, which
+//     converts it to the corresponding Unicode character.
+//
+// This works for ALL Unicode characters (Chinese, Japanese, Korean,
+// emoji, etc.) without needing an IME.
+func (i *xtestInjector) typeUnicode(r rune) error {
+        keysym := xproto.Keysym(0x01000000) | xproto.Keysym(r)
+
+        // Find an unused keycode to temporarily map. We use the first keycode
+        // after the server's max — it won't conflict with physical keys.
+        setup := xproto.Setup(i.conn)
+        min := setup.MinKeycode
+        max := setup.MaxKeycode
+        // Use max+1 if possible, otherwise fall back to a high keycode that's
+        // unlikely to be used (e.g. 255).
+        keycode := max + 1
+        if keycode > 255 {
+                keycode = 255
         }
+        if keycode < min {
+                keycode = min
+        }
+
+        // Map the keycode to our Unicode keysym.
+        // XChangeKeyboardMapping(firstKeycode, keysymsPerKeycode, keysyms)
+        cookie := xproto.ChangeKeyboardMappingChecked(
+                i.conn,
+                1,                          // count = 1 keycode
+                keycode,                    // firstKeycode
+                1,                          // keysymsPerKeycode
+                []uint32{uint32(keysym)},   // the keysym
+        )
+        if err := cookie.Check(); err != nil {
+                return fmt.Errorf("ChangeKeyboardMapping: %w", err)
+        }
+
+        // Small delay to let X server process the mapping change.
+        // Without this, some X servers deliver the old keysym.
+        time.Sleep(10 * time.Millisecond)
+
+        // Press + release the keycode (atomic, no auto-repeat).
+        if err := xtest.FakeInputChecked(i.conn, byte(xproto.KeyPress), byte(keycode), 0, 0, 0, 0, 0).Check(); err != nil {
+                return fmt.Errorf("fake keypress: %w", err)
+        }
+        if err := xtest.FakeInputChecked(i.conn, byte(xproto.KeyRelease), byte(keycode), 0, 0, 0, 0, 0).Check(); err != nil {
+                return fmt.Errorf("fake keyrelease: %w", err)
+        }
+
+        // Restore the original mapping (clear the temporary keysym).
+        xproto.ChangeKeyboardMappingChecked(
+                i.conn, 1, keycode, 1, []uint32{0},
+        ).Check()
+
         return nil
 }
 
