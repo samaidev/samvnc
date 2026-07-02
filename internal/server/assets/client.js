@@ -394,18 +394,16 @@
 
   function writeLocalAndPaste(text) {
     // Write remote content to the local clipboard so a quick local paste
-    // also works, then inject Ctrl+V into the remote desktop.
+    // also works, then inject the text directly into the remote desktop
+    // via `type` (xdotool type on the server). This works for ALL apps
+    // (xterm, xfce4-terminal, browsers, editors) regardless of whether
+    // they bind Ctrl+V to paste. The previous approach of injecting
+    // Ctrl+V failed because many X apps (xterm especially) don't bind
+    // Ctrl+V to paste by default.
     const done = function () {
-      // Inject Ctrl+V into the remote: press ctrl, press v, release v,
-      // release ctrl. Non-modifier 'v' uses atomic key on keydown.
-      sendJSON({ type: "key", key: "Control", code: "ControlLeft", down: true,
-                 repeat: false, ctrl: true, alt: false, shift: false, meta: false });
-      sendJSON({ type: "key", key: "v", code: "KeyV", down: true,
-                 repeat: false, ctrl: true, alt: false, shift: false, meta: false });
-      sendJSON({ type: "key", key: "v", code: "KeyV", down: false,
-                 repeat: false, ctrl: true, alt: false, shift: false, meta: false });
-      sendJSON({ type: "key", key: "Control", code: "ControlLeft", down: false,
-                 repeat: false, ctrl: false, alt: false, shift: false, meta: false });
+      if (text) {
+        sendJSON({ type: "text", text: text });
+      }
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text || "").then(done).catch(done);
