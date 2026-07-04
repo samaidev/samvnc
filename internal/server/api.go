@@ -149,6 +149,14 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
                 s.apiIframeClick(w, r)
         case p == "/api/iframe/type":
                 s.apiIframeType(w, r)
+        case p == "/api/drag":
+                s.apiDrag(w, r)
+        case p == "/api/cdp/drag":
+                s.apiCdpDrag(w, r)
+        case p == "/api/cdp/click":
+                s.apiCdpClick(w, r)
+        case p == "/api/cdp/type":
+                s.apiCdpType(w, r)
         default:
                 http.Error(w, `{"error":"unknown api endpoint"}`, http.StatusNotFound)
         }
@@ -383,6 +391,77 @@ func encodePNG(w io.Writer, img interface{}) error {
         return png.Encode(w, rgba)
 }
 
+// apiDrag performs a mouse drag (mousedown -> move -> mouseup) via X11.
+// POST /api/drag {"x1":100,"y1":200,"x2":400,"y2":200,"steps":30}
+// This is essential for slider captcha verification — JS event simulation
+// in isolated worlds doesn't trigger anti-bot JS listeners, but real X11
+// input goes through the normal browser input path.
+func (s *Server) apiDrag(w http.ResponseWriter, r *http.Request) {
+        if s.api == nil || s.api.injector == nil {
+                http.Error(w, `{"error":"injector not available"}`, http.StatusServiceUnavailable)
+                return
+        }
+        var req struct {
+                X1    int `json:"x1"`
+                Y1    int `json:"y1"`
+                X2    int `json:"x2"`
+                Y2    int `json:"y2"`
+                Steps int `json:"steps"`
+        }
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+                http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+                return
+        }
+        if req.Steps <= 0 {
+                req.Steps = 30
+        }
+
+        log.Printf("[api] drag from (%d,%d) to (%d,%d) in %d steps", req.X1, req.Y1, req.X2, req.Y2, req.Steps)
+
+        // 1. Move to start position
+        ev := protocol.MouseEvent{Type: "mouse", X: req.X1, Y: req.Y1, Mask: 0}
+        if err := s.api.injector.Mouse(ev); err != nil {
+                http.Error(w, fmt.Sprintf(`{"error":"move: %s"}`, err), http.StatusInternalServerError)
+                return
+        }
+        time.Sleep(100 * time.Millisecond)
+
+        // 2. Press left button
+        ev.Mask = protocol.ButtonLeft
+        if err := s.api.injector.Mouse(ev); err != nil {
+                http.Error(w, fmt.Sprintf(`{"error":"press: %s"}`, err), http.StatusInternalServerError)
+                return
+        }
+        time.Sleep(100 * time.Millisecond)
+
+        // 3. Drag in steps (add slight Y jitter for human-like movement)
+        for i := 1; i <= req.Steps; i++ {
+                x := req.X1 + (req.X2-req.X1)*i/req.Steps
+                y := req.Y1 + (req.Y2-req.Y1)*i/req.Steps
+                // Small random jitter
+                jitter := (i % 3) - 1
+                ev := protocol.MouseEvent{Type: "mouse", X: x, Y: y + jitter, Mask: protocol.ButtonLeft}
+                if err := s.api.injector.Mouse(ev); err != nil {
+                        log.Printf("[api] drag step %d error: %v", i, err)
+                }
+                time.Sleep(20 * time.Millisecond)
+        }
+
+        // 4. Release at end position
+        ev = protocol.MouseEvent{Type: "mouse", X: req.X2, Y: req.Y2, Mask: 0}
+        if err := s.api.injector.Mouse(ev); err != nil {
+                http.Error(w, fmt.Sprintf(`{"error":"release: %s"}`, err), http.StatusInternalServerError)
+                return
+        }
+
+        json.NewEncoder(w).Encode(map[string]interface{}{
+                "ok":    true,
+                "x1":    req.X1, "y1": req.Y1,
+                "x2":    req.X2, "y2": req.Y2,
+                "steps": req.Steps,
+        })
+}
+
 // --- iframe API handlers ---
 
 // apiTargets lists all CDP targets (pages + iframes).
@@ -540,4 +619,96 @@ func (s *Server) apiIframeType(w http.ResponseWriter, r *http.Request) {
                 return
         }
         json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "selector": req.Selector, "text": req.Text, "result": result})
+}
+
+// apiCdpDrag performs a drag via CDP Input.dispatchMouseEvent.
+// This bypasses X11 and goes through Chrome's internal input pipeline,
+// which is more reliable for interacting with anti-bot components.
+// POST /api/cdp/drag {"x1":100,"y1":200,"x2":400,"y2":200,"steps":25}
+func (s *Server) apiCdpDrag(w http.ResponseWriter, r *http.Request) {
+        cdpClient := s.api.getCDP()
+        if cdpClient == nil {
+                http.Error(w, `{"error":"cdp not available"}`, http.StatusServiceUnavailable)
+                return
+        }
+        var req struct {
+                X1    float64 `json:"x1"`
+                Y1    float64 `json:"y1"`
+                X2    float64 `json:"x2"`
+                Y2    float64 `json:"y2"`
+                Steps int     `json:"steps"`
+        }
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+                http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+                return
+        }
+        if req.Steps <= 0 {
+                req.Steps = 25
+        }
+        ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+        defer cancel()
+
+        log.Printf("[api] CDP drag from (%.0f,%.0f) to (%.0f,%.0f) in %d steps", req.X1, req.Y1, req.X2, req.Y2, req.Steps)
+
+        if err := cdpClient.DispatchMouseDrag(ctx, req.X1, req.Y1, req.X2, req.Y2, req.Steps); err != nil {
+                http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
+                return
+        }
+        json.NewEncoder(w).Encode(map[string]interface{}{
+                "ok":    true,
+                "x1":    req.X1, "y1": req.Y1,
+                "x2":    req.X2, "y2": req.Y2,
+                "steps": req.Steps,
+                "method": "cdp",
+        })
+}
+
+// apiCdpClick performs a click via CDP Input.dispatchMouseEvent.
+// POST /api/cdp/click {"x":100,"y":200}
+func (s *Server) apiCdpClick(w http.ResponseWriter, r *http.Request) {
+        cdpClient := s.api.getCDP()
+        if cdpClient == nil {
+                http.Error(w, `{"error":"cdp not available"}`, http.StatusServiceUnavailable)
+                return
+        }
+        var req struct {
+                X float64 `json:"x"`
+                Y float64 `json:"y"`
+        }
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+                http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+                return
+        }
+        ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        if err := cdpClient.DispatchClick(ctx, req.X, req.Y); err != nil {
+                http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
+                return
+        }
+        json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "x": req.X, "y": req.Y, "method": "cdp"})
+}
+
+// apiCdpType inserts text via CDP Input.insertText.
+// Must be called after focusing the element (e.g. via /api/cdp/click).
+// POST /api/cdp/type {"text":"hello"}
+func (s *Server) apiCdpType(w http.ResponseWriter, r *http.Request) {
+        cdpClient := s.api.getCDP()
+        if cdpClient == nil {
+                http.Error(w, `{"error":"cdp not available"}`, http.StatusServiceUnavailable)
+                return
+        }
+        var req struct {
+                Text string `json:"text"`
+        }
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+                http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+                return
+        }
+        ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+        defer cancel()
+        if err := cdpClient.InsertText(ctx, req.Text); err != nil {
+                http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
+                return
+        }
+        json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "text": req.Text, "method": "cdp"})
 }

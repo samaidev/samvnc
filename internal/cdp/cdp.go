@@ -224,86 +224,9 @@ func (c *Client) getTargetWSURL(targetID string) (string, error) {
 }
 
 // EvalInIframe evaluates JavaScript in an iframe whose URL contains urlContains.
-// Uses Target.attachToTarget for OOPIF support (cross-origin iframes).
+// Uses Page.getFrameTree + Page.createIsolatedWorld for cross-origin iframe support.
 func (c *Client) EvalInIframe(ctx context.Context, urlContains, expression string) (interface{}, error) {
-        // 1. Use Target.getTargets to find the iframe
-        result, err := c.send(ctx, "Target.getTargets", nil)
-        if err != nil {
-                return nil, fmt.Errorf("cdp: Target.getTargets: %w", err)
-        }
-
-        var resp struct {
-                TargetInfos []struct {
-                        TargetID string `json:"targetId"`
-                        Type     string `json:"type"`
-                        URL      string `json:"url"`
-                } `json:"targetInfos"`
-        }
-        if err := json.Unmarshal(result, &resp); err != nil {
-                return nil, fmt.Errorf("cdp: parse targets: %w", err)
-        }
-
-        var targetID string
-        for _, t := range resp.TargetInfos {
-                if strings.Contains(t.URL, urlContains) {
-                        targetID = t.TargetID
-                        break
-                }
-        }
-        if targetID == "" {
-                return nil, fmt.Errorf("cdp: no target matching %q", urlContains)
-        }
-
-        // 2. Attach to target to get sessionId
-        attachParams := map[string]interface{}{
-                "targetId":  targetID,
-                "flatten":   true,
-        }
-        attachResult, err := c.send(ctx, "Target.attachToTarget", attachParams)
-        if err != nil {
-                return nil, fmt.Errorf("cdp: attach to %s: %w", targetID, err)
-        }
-
-        var attachResp struct {
-                SessionID string `json:"sessionId"`
-        }
-        if err := json.Unmarshal(attachResult, &attachResp); err != nil {
-                return nil, fmt.Errorf("cdp: parse attach result: %w", err)
-        }
-        sessionID := attachResp.SessionID
-
-        // 3. Evaluate JS with sessionId
-        evalParams := map[string]interface{}{
-                "expression":    expression,
-                "returnByValue": true,
-                "awaitPromise":  true,
-        }
-        evalResult, err := c.sendWithSession(ctx, "Runtime.evaluate", evalParams, sessionID)
-        if err != nil {
-                return nil, fmt.Errorf("cdp: iframe eval: %w", err)
-        }
-
-        var evalResp struct {
-                Result struct {
-                        Type  string          `json:"type"`
-                        Value json.RawMessage `json:"value"`
-                } `json:"result"`
-                ExceptionDetails *struct {
-                        Text string `json:"text"`
-                } `json:"exceptionDetails"`
-        }
-        if err := json.Unmarshal(evalResult, &evalResp); err != nil {
-                return nil, fmt.Errorf("cdp: parse eval result: %w", err)
-        }
-        if evalResp.ExceptionDetails != nil {
-                return nil, fmt.Errorf("cdp: iframe JS exception: %s", evalResp.ExceptionDetails.Text)
-        }
-
-        var value interface{}
-        if err := json.Unmarshal(evalResp.Result.Value, &value); err != nil {
-                return string(evalResp.Result.Value), nil
-        }
-        return value, nil
+        return c.EvalInFrame(ctx, urlContains, expression)
 }
 
 // getOrCreateIframeConn connects to an iframe target WebSocket (with caching).
@@ -599,6 +522,89 @@ func (c *Client) GetCookies(ctx context.Context) ([]map[string]interface{}, erro
                 return nil, fmt.Errorf("cdp: parse cookies: %w", err)
         }
         return cookiesResp.Cookies, nil
+}
+
+// DispatchMouse dispatches a mouse event via CDP Input domain.
+// This bypasses X11 and goes directly through Chrome's input pipeline.
+// type: "mousePressed", "mouseMoved", or "mouseReleased"
+// x, y: coordinates relative to the viewport
+// button: "left", "right", "middle", "none"
+func (c *Client) DispatchMouse(ctx context.Context, eventType string, x, y float64, button string) error {
+        params := map[string]interface{}{
+                "type":   eventType,
+                "x":      x,
+                "y":      y,
+                "button": button,
+                "clickCount": 1,
+        }
+        _, err := c.send(ctx, "Input.dispatchMouseEvent", params)
+        return err
+}
+
+// DispatchMouseDrag performs a drag operation via CDP Input domain.
+// mousedown at (x1,y1) -> mousemove in steps -> mouseup at (x2,y2)
+func (c *Client) DispatchMouseDrag(ctx context.Context, x1, y1, x2, y2 float64, steps int) error {
+        if steps <= 0 {
+                steps = 25
+        }
+
+        // 1. Move to start
+        if err := c.DispatchMouse(ctx, "mouseMoved", x1, y1, "none"); err != nil {
+                return fmt.Errorf("move: %w", err)
+        }
+        time.Sleep(50 * time.Millisecond)
+
+        // 2. Press
+        if err := c.DispatchMouse(ctx, "mousePressed", x1, y1, "left"); err != nil {
+                return fmt.Errorf("press: %w", err)
+        }
+        time.Sleep(50 * time.Millisecond)
+
+        // 3. Drag in steps
+        for i := 1; i <= steps; i++ {
+                x := x1 + (x2-x1)*float64(i)/float64(steps)
+                y := y1 + (y2-y1)*float64(i)/float64(steps)
+                // Add tiny jitter
+                jitter := float64(i%3-1) * 0.5
+                if err := c.DispatchMouse(ctx, "mouseMoved", x, y+jitter, "left"); err != nil {
+                        log.Printf("[cdp] drag step %d error: %v", i, err)
+                }
+                time.Sleep(20 * time.Millisecond)
+        }
+
+        // 4. Release
+        if err := c.DispatchMouse(ctx, "mouseReleased", x2, y2, "left"); err != nil {
+                return fmt.Errorf("release: %w", err)
+        }
+        return nil
+}
+
+// DispatchClick performs a click via CDP Input domain.
+// mousePressed then mouseReleased at (x, y).
+func (c *Client) DispatchClick(ctx context.Context, x, y float64) error {
+        if err := c.DispatchMouse(ctx, "mouseMoved", x, y, "none"); err != nil {
+                return fmt.Errorf("move: %w", err)
+        }
+        time.Sleep(50 * time.Millisecond)
+        if err := c.DispatchMouse(ctx, "mousePressed", x, y, "left"); err != nil {
+                return fmt.Errorf("press: %w", err)
+        }
+        time.Sleep(50 * time.Millisecond)
+        if err := c.DispatchMouse(ctx, "mouseReleased", x, y, "left"); err != nil {
+                return fmt.Errorf("release: %w", err)
+        }
+        return nil
+}
+
+// InsertText inserts text via CDP Input.insertText.
+// This is the simplest way to type text - works like paste.
+// Must be called after focusing the target element (e.g. via DispatchClick).
+func (c *Client) InsertText(ctx context.Context, text string) error {
+        params := map[string]interface{}{
+                "text": text,
+        }
+        _, err := c.send(ctx, "Input.insertText", params)
+        return err
 }
 
 // Close closes the CDP connection.
