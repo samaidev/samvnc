@@ -531,14 +531,110 @@ func (c *Client) GetCookies(ctx context.Context) ([]map[string]interface{}, erro
 // button: "left", "right", "middle", "none"
 func (c *Client) DispatchMouse(ctx context.Context, eventType string, x, y float64, button string) error {
         params := map[string]interface{}{
-                "type":   eventType,
-                "x":      x,
-                "y":      y,
-                "button": button,
+                "type":       eventType,
+                "x":          x,
+                "y":          y,
+                "button":     button,
                 "clickCount": 1,
         }
         _, err := c.send(ctx, "Input.dispatchMouseEvent", params)
         return err
+}
+
+// DispatchMouseFull is the configurable form of DispatchMouse. Pass
+// clickCount=0 to omit the field (Chrome default = 0). Pass button="none"
+// for motion-only events. modifiers is the CDP bitmask
+// (1=Alt, 2=Ctrl, 4=Meta, 8=Shift).
+func (c *Client) DispatchMouseFull(ctx context.Context, eventType string, x, y float64, button string, clickCount int, modifiers int) error {
+        params := map[string]interface{}{
+                "type":   eventType,
+                "x":      x,
+                "y":      y,
+                "button": button,
+        }
+        if clickCount > 0 {
+                params["clickCount"] = clickCount
+        }
+        if modifiers != 0 {
+                params["modifiers"] = modifiers
+        }
+        _, err := c.send(ctx, "Input.dispatchMouseEvent", params)
+        return err
+}
+
+// DispatchMouseWheel emits a mouseWheel event via CDP. deltaX/deltaY are
+// pixel deltas (positive = scroll right/down).
+func (c *Client) DispatchMouseWheel(ctx context.Context, x, y float64, deltaX, deltaY float64, modifiers int) error {
+        params := map[string]interface{}{
+                "type":   "mouseWheel",
+                "x":      x,
+                "y":      y,
+                "deltaX": deltaX,
+                "deltaY": deltaY,
+                "button": "none",
+        }
+        if modifiers != 0 {
+                params["modifiers"] = modifiers
+        }
+        _, err := c.send(ctx, "Input.dispatchMouseEvent", params)
+        return err
+}
+
+// DispatchKeyEvent dispatches a keyboard event via CDP Input domain.
+// type: "rawKeyDown", "keyDown", "keyUp", or "char"
+// windowsVirtualKeyCode is the Windows VK code (e.g. 0x0D for Enter).
+// code is the DOM code (e.g. "KeyA").
+// key is the DOM key (e.g. "a", "Enter").
+// text is the text produced (only for "char" / "keyDown").
+// modifiers is the CDP bitmask (1=Alt,2=Ctrl,4=Meta,8=Shift).
+func (c *Client) DispatchKeyEvent(ctx context.Context, eventType, code, key, text string, windowsVirtualKeyCode int, modifiers int, autoRepeat bool) error {
+        params := map[string]interface{}{
+                "type": eventType,
+        }
+        if modifiers != 0 {
+                params["modifiers"] = modifiers
+        }
+        if windowsVirtualKeyCode != 0 {
+                params["windowsVirtualKeyCode"] = windowsVirtualKeyCode
+        }
+        if code != "" {
+                params["code"] = code
+        }
+        if key != "" {
+                params["key"] = key
+        }
+        if text != "" {
+                params["text"] = text
+        }
+        if autoRepeat {
+                params["autoRepeat"] = true
+        }
+        _, err := c.send(ctx, "Input.dispatchKeyEvent", params)
+        return err
+}
+
+// DispatchKeyPress performs a full keyDown + char + keyUp for a single key,
+// translated from a DOM KeyboardEvent description.
+func (c *Client) DispatchKeyPress(ctx context.Context, code, key string, windowsVK int, modifiers int) error {
+        // For printable ASCII chars (no modifiers) Chrome expects a text payload.
+        text := ""
+        if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f && modifiers == 0 {
+                text = key
+        }
+        if err := c.DispatchKeyEvent(ctx, "keyDown", code, key, text, windowsVK, modifiers, false); err != nil {
+                return err
+        }
+        if text != "" {
+                // "char" is implied by the spec for printable keyDown; some Chrome
+                // versions still need it explicitly.
+                if err := c.DispatchKeyEvent(ctx, "char", code, key, text, windowsVK, modifiers, false); err != nil {
+                        return err
+                }
+        }
+        if err := c.DispatchKeyEvent(ctx, "keyUp", code, key, "", windowsVK, modifiers, false); err != nil {
+                return err
+        }
+        return nil
 }
 
 // DispatchMouseDrag performs a drag operation via CDP Input domain.

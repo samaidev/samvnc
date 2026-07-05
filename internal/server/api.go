@@ -157,6 +157,39 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
                 s.apiCdpClick(w, r)
         case p == "/api/cdp/type":
                 s.apiCdpType(w, r)
+        // --- Remote desktop API (full mouse/keyboard) ---
+        case p == "/api/mouse/move":
+                s.apiMouseMove(w, r)
+        case p == "/api/mouse/down":
+                s.apiMouseDown(w, r)
+        case p == "/api/mouse/up":
+                s.apiMouseUp(w, r)
+        case p == "/api/mouse/click":
+                s.apiMouseClick(w, r)
+        case p == "/api/mouse/double":
+                s.apiMouseDoubleClick(w, r)
+        case p == "/api/mouse/right":
+                s.apiMouseRightClick(w, r)
+        case p == "/api/mouse/middle":
+                s.apiMouseMiddleClick(w, r)
+        case p == "/api/mouse/wheel":
+                s.apiMouseWheel(w, r)
+        case p == "/api/mouse/drag":
+                s.apiMouseDrag(w, r)
+        case p == "/api/mouse/position":
+                s.apiMousePosition(w, r)
+        case p == "/api/key/down":
+                s.apiKeyDown(w, r)
+        case p == "/api/key/up":
+                s.apiKeyUp(w, r)
+        case p == "/api/key/press":
+                s.apiKeyPress(w, r)
+        case p == "/api/key/type":
+                s.apiKeyType(w, r)
+        case p == "/api/key/combo":
+                s.apiKeyCombo(w, r)
+        case p == "/api/input/batch":
+                s.apiInputBatch(w, r)
         default:
                 http.Error(w, `{"error":"unknown api endpoint"}`, http.StatusNotFound)
         }

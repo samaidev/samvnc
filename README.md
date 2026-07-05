@@ -117,6 +117,96 @@ The `iframe` field is a URL substring used to match the iframe
 
 For slider captcha (NoCaptcha), `/api/cdp/drag` is the right choice.
 
+### Remote desktop API (full mouse + keyboard)
+
+A complete set of `/api/mouse/*` and `/api/key/*` endpoints for driving the
+remote desktop. Each endpoint **prefers CDP** (Chrome's input pipeline) when
+a CDP connection is available and **falls back to X11 XTEST** otherwise, so
+the same API works against both Chrome pages and arbitrary X11 apps
+(terminals, file managers, browser chrome). The response's `method` field
+records which path was used (`"cdp"` or `"x11"`).
+
+#### Mouse
+
+| Method | Path                | Body                                          | Description                          |
+|--------|---------------------|-----------------------------------------------|--------------------------------------|
+| POST   | `/api/mouse/move`   | `{"x":100,"y":200}`                           | Move pointer (no click)              |
+| POST   | `/api/mouse/down`   | `{"x":100,"y":200,"button":"left"}`          | Press button (`left`/`right`/`middle`) |
+| POST   | `/api/mouse/up`     | `{"x":100,"y":200,"button":"left"}`          | Release button                       |
+| POST   | `/api/mouse/click`  | `{"x":100,"y":200,"button":"left"}`          | Single click                         |
+| POST   | `/api/mouse/double` | `{"x":100,"y":200,"button":"left"}`          | Double click                         |
+| POST   | `/api/mouse/right`  | `{"x":100,"y":200}`                           | Right click                          |
+| POST   | `/api/mouse/middle` | `{"x":100,"y":200}`                           | Middle click                         |
+| POST   | `/api/mouse/wheel`  | `{"x":100,"y":200,"dx":0,"dy":-100}`         | Scroll wheel (pixel deltas)          |
+| POST   | `/api/mouse/drag`   | `{"x1":100,"y1":200,"x2":400,"y2":200,"steps":30,"button":"left"}` | Drag (any button) |
+| GET    | `/api/mouse/position` |                                             | Query last-known cursor position     |
+
+The optional `modifiers` field (CDP bitmask: `1`=Alt, `2`=Ctrl, `4`=Meta,
+`8`=Shift) can be added to any mouse event to inject a chorded click
+(e.g. Shift+click).
+
+#### Keyboard
+
+| Method | Path             | Body                                              | Description                          |
+|--------|------------------|---------------------------------------------------|--------------------------------------|
+| POST   | `/api/key/down`  | `{"code":"KeyA","key":"a"}`                       | Key down (no release)                |
+| POST   | `/api/key/up`    | `{"code":"KeyA","key":"a"}`                       | Key up                               |
+| POST   | `/api/key/press` | `{"code":"Enter","key":"Enter"}`                  | Atomic key down + up                 |
+| POST   | `/api/key/type`  | `{"text":"hello 你好"}`                           | Type Unicode text (paste-like)       |
+| POST   | `/api/key/combo` | `{"keys":["Control","Shift","KeyA"]}`             | Key chord (hold all, tap last)       |
+
+`code` is the DOM `KeyboardEvent.code` (e.g. `KeyA`, `Enter`, `ArrowLeft`,
+`F5`), `key` is the DOM `KeyboardEvent.key` (e.g. `a`, `Enter`, `ArrowLeft`).
+Optional `modifiers` (CDP bitmask) or `modifiers_list` (e.g.
+`["Control","Shift"]`) inject modifier-chorded keys. For full chords use
+`/api/key/combo` which holds each modifier, taps the final non-modifier key,
+and releases the modifiers in reverse order.
+
+```bash
+# Right-click
+curl -X POST http://localhost:8128/api/mouse/right \
+  -H 'Content-Type: application/json' -d '{"x":400,"y":300}'
+
+# Type Unicode text
+curl -X POST http://localhost:8128/api/key/type \
+  -H 'Content-Type: application/json' -d '{"text":"你好 world"}'
+
+# Ctrl+Shift+T (reopen closed tab)
+curl -X POST http://localhost:8128/api/key/combo \
+  -H 'Content-Type: application/json' -d '{"keys":["Control","Shift","KeyT"]}'
+
+# Scroll down 200px
+curl -X POST http://localhost:8128/api/mouse/wheel \
+  -H 'Content-Type: application/json' -d '{"x":640,"y":360,"dx":0,"dy":200}'
+```
+
+#### Batch input (`/api/input/batch`)
+
+Dispatch a sequence of input events in a single HTTP request — useful for
+complex gestures (multi-step drags, key sequences with timing) that would
+otherwise require many round-trips. Each event has a `type` and the fields
+relevant to that type; an optional `wait_ms` pauses before the next event.
+
+```bash
+curl -X POST http://localhost:8128/api/input/batch \
+  -H 'Content-Type: application/json' -d '{
+    "events": [
+      {"type":"mouse_move","x":100,"y":200},
+      {"type":"mouse_down","button":"left"},
+      {"type":"wait","wait_ms":50},
+      {"type":"mouse_move","x":400,"y":200},
+      {"type":"mouse_up","button":"left"},
+      {"type":"key_press","code":"Enter","key":"Enter"},
+      {"type":"key_type","text":"hello"}
+    ]
+  }'
+```
+
+Supported event types: `mouse_move`, `mouse_down`, `mouse_up`,
+`mouse_click`, `mouse_wheel`, `key_down`, `key_up`, `key_press`,
+`key_type`, `wait`. The response includes per-event success/failure so
+partial failures can be diagnosed.
+
 ### Low-level protocol (`/poll`)
 
 For batches of mouse/keyboard events (e.g. custom drag trajectories),
@@ -225,9 +315,10 @@ samvnc/
 │   │   ├── http.go              # SSE + /poll HTTP transport
 │   │   ├── web.go               # static assets + routing
 │   │   ├── api.go               # /api/* HTTP endpoints
+│   │   ├── api_desktop.go       # /api/mouse/* + /api/key/* remote-desktop API
 │   │   └── assets/              # browser client (HTML/JS/CSS)
 │   ├── cdp/
-│   │   ├── cdp.go               # CDP client: Eval, Navigate, Cookies, Dispatch*
+│   │   ├── cdp.go               # CDP client: Eval, Navigate, Cookies, Dispatch* (mouse/key/wheel)
 │   │   └── frame.go             # CDP frame tree → isolated world eval
 │   ├── input/                   # X11 XTEST input injection
 │   ├── capture/                 # X11 XGetImage screen capture
