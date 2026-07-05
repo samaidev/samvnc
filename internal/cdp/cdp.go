@@ -621,7 +621,13 @@ func (c *Client) DispatchKeyPress(ctx context.Context, code, key string, windows
         if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f && modifiers == 0 {
                 text = key
         }
-        if err := c.DispatchKeyEvent(ctx, "keyDown", code, key, text, windowsVK, modifiers, false); err != nil {
+        // When modifiers are held, the key is non-printable for Chrome's text
+        // pipeline: use rawKeyDown (which doesn't synthesize a char event).
+        downType := "keyDown"
+        if modifiers != 0 {
+                downType = "rawKeyDown"
+        }
+        if err := c.DispatchKeyEvent(ctx, downType, code, key, text, windowsVK, modifiers, false); err != nil {
                 return err
         }
         if text != "" {

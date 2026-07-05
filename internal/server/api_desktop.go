@@ -77,6 +77,53 @@ func domToCDPModifier(mods []string) int {
         return m
 }
 
+// normalizeDOMKey converts a user-supplied key name into a (DOM code, DOM key)
+// pair. Accepts either a DOM code (e.g. "KeyA", "Enter", "ArrowLeft") or a
+// single character (e.g. "a", "1"). For single chars the code is derived
+// from the char (e.g. "a" -> ("KeyA","a"), "1" -> ("Digit1","1")).
+func normalizeDOMKey(name string) (code, key string) {
+        if len(name) == 1 {
+                c := name[0]
+                if c >= 'a' && c <= 'z' {
+                        return "Key" + strings.ToUpper(name), name
+                }
+                if c >= 'A' && c <= 'Z' {
+                        return "Key" + name, strings.ToLower(name)
+                }
+                if c >= '0' && c <= '9' {
+                        return "Digit" + name, name
+                }
+                return name, name
+        }
+        // Already a DOM code; derive the key from it.
+        switch name {
+        case "Enter":
+                return name, "Enter"
+        case "Backspace":
+                return name, "Backspace"
+        case "Tab":
+                return name, "Tab"
+        case "Escape":
+                return name, "Escape"
+        case "Space":
+                return name, " "
+        case "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown":
+                return name, name
+        case "Home", "End", "PageUp", "PageDown", "Insert", "Delete":
+                return name, name
+        case "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12":
+                return name, name
+        }
+        // KeyA..KeyZ / Digit0..Digit9: derive lowercase key.
+        if strings.HasPrefix(name, "Key") && len(name) == 4 {
+                return name, strings.ToLower(name[3:])
+        }
+        if strings.HasPrefix(name, "Digit") && len(name) == 6 {
+                return name, name[5:]
+        }
+        return name, name
+}
+
 // domKeyToVK maps common DOM key names to Windows virtual-key codes.
 // Used as a hint for CDP Input.dispatchKeyEvent.
 func domKeyToVK(key, code string) int {
@@ -635,10 +682,25 @@ func (s *Server) apiKeyCombo(w http.ResponseWriter, r *http.Request) {
                 return
         }
 
-        // Build keyReq list from names. Names like "Control"/"Shift"/"Alt"/"Meta"
-        // become modifier flags; everything else is treated as a DOM code.
+        method, err := s.dispatchCombo(r.Context(), req.Keys)
+        if err != nil {
+                http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
+                return
+        }
+        json.NewEncoder(w).Encode(map[string]interface{}{
+                "ok": true, "keys": req.Keys, "method": method,
+        })
+}
+
+// dispatchCombo is the HTTP-agnostic core of /api/key/combo. It returns the
+// method used ("cdp" or "x11"). CDP path: hold each modifier (rawKeyDown),
+// tap the last non-modifier key (keyDown+keyUp), release modifiers (keyUp).
+// X11 path: single KeyEvent with modifier flags.
+func (s *Server) dispatchCombo(ctx context.Context, names []string) (string, error) {
+        // Build resolved key list. Modifier names become modifier flags;
+        // everything else is treated as a DOM code or single char.
         var resolved []resolvedKey
-        for _, name := range req.Keys {
+        for _, name := range names {
                 switch strings.ToLower(name) {
                 case "control", "ctrl":
                         resolved = append(resolved, resolvedKey{code: "ControlLeft", key: "Control", vk: 0x11, mod: cdpModCtrl})
@@ -649,27 +711,20 @@ func (s *Server) apiKeyCombo(w http.ResponseWriter, r *http.Request) {
                 case "meta", "super", "win", "cmd":
                         resolved = append(resolved, resolvedKey{code: "MetaLeft", key: "Meta", vk: 0x5B, mod: cdpModMeta})
                 default:
-                        // Treat as a DOM code or single char.
-                        key := name
-                        if len(name) == 1 {
-                                key = name
-                        }
-                        resolved = append(resolved, resolvedKey{code: name, key: key, vk: domKeyToVK(key, name), mod: 0})
+                        code, key := normalizeDOMKey(name)
+                        resolved = append(resolved, resolvedKey{code: code, key: key, vk: domKeyToVK(key, code), mod: 0})
                 }
         }
 
         cdpClient := s.api.getCDP()
         if cdpClient != nil {
-                ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-                defer cancel()
                 // Press modifiers first (rawKeyDown so no char event), then main key.
                 for _, k := range resolved {
                         if k.mod == 0 {
                                 continue
                         }
                         if err := cdpClient.DispatchKeyEvent(ctx, "rawKeyDown", k.code, k.key, "", k.vk, k.mod, false); err != nil {
-                                http.Error(w, fmt.Sprintf(`{"error":"mod down %s: %s"}`, k.key, err), http.StatusInternalServerError)
-                                return
+                                return "cdp", fmt.Errorf("mod down %s: %w", k.key, err)
                         }
                 }
                 // Main key (last non-modifier).
@@ -679,8 +734,7 @@ func (s *Server) apiKeyCombo(w http.ResponseWriter, r *http.Request) {
                         }
                         k := resolved[i]
                         if err := cdpClient.DispatchKeyPress(ctx, k.code, k.key, k.vk, combinedMod(resolved)); err != nil {
-                                http.Error(w, fmt.Sprintf(`{"error":"main key %s: %s"}`, k.key, err), http.StatusInternalServerError)
-                                return
+                                return "cdp", fmt.Errorf("main key %s: %w", k.key, err)
                         }
                         break
                 }
@@ -691,24 +745,19 @@ func (s *Server) apiKeyCombo(w http.ResponseWriter, r *http.Request) {
                         }
                         k := resolved[i]
                         if err := cdpClient.DispatchKeyEvent(ctx, "keyUp", k.code, k.key, "", k.vk, k.mod, false); err != nil {
-                                http.Error(w, fmt.Sprintf(`{"error":"mod up %s: %s"}`, k.key, err), http.StatusInternalServerError)
-                                return
+                                return "cdp", fmt.Errorf("mod up %s: %w", k.key, err)
                         }
                 }
-                json.NewEncoder(w).Encode(map[string]interface{}{
-                        "ok": true, "keys": req.Keys, "method": "cdp",
-                })
-                return
+                return "cdp", nil
         }
 
         // X11 fallback: build a single protocol.KeyEvent with modifier flags.
         if s.api == nil || s.api.injector == nil {
-                http.Error(w, `{"error":"neither cdp nor injector available"}`, http.StatusServiceUnavailable)
-                return
+                return "", fmt.Errorf("neither cdp nor injector available")
         }
         var mainKey keyReq
         var mods int
-        for _, name := range req.Keys {
+        for _, name := range names {
                 switch strings.ToLower(name) {
                 case "control", "ctrl":
                         mods |= cdpModCtrl
@@ -722,7 +771,6 @@ func (s *Server) apiKeyCombo(w http.ResponseWriter, r *http.Request) {
                         mainKey = keyReq{Code: name, Key: name}
                 }
         }
-        mainKey.Modifiers = mods
         ev := protocol.KeyEvent{
                 Type:  "key",
                 Code:  mainKey.Code,
@@ -734,12 +782,9 @@ func (s *Server) apiKeyCombo(w http.ResponseWriter, r *http.Request) {
                 Meta:  mods&cdpModMeta != 0,
         }
         if err := s.api.injector.Key(ev); err != nil {
-                http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
-                return
+                return "x11", err
         }
-        json.NewEncoder(w).Encode(map[string]interface{}{
-                "ok": true, "keys": req.Keys, "method": "x11",
-        })
+        return "x11", nil
 }
 
 // resolvedKey is a parsed key from a combo request: either a modifier
@@ -764,12 +809,17 @@ func combinedMod(keys []resolvedKey) int {
 
 // batchEvent is a single event in an /api/input/batch request. The Type
 // field selects the kind: "mouse_move", "mouse_down", "mouse_up",
-// "mouse_click", "mouse_wheel", "key_down", "key_up", "key_press",
-// "key_type", "wait".
+// "mouse_click", "mouse_double", "mouse_wheel", "mouse_drag",
+// "key_down", "key_up", "key_press", "key_type", "key_combo", "wait".
 type batchEvent struct {
         Type      string   `json:"type"`
         X         float64  `json:"x"`
         Y         float64  `json:"y"`
+        X1        float64  `json:"x1"`
+        Y1        float64  `json:"y1"`
+        X2        float64  `json:"x2"`
+        Y2        float64  `json:"y2"`
+        Steps     int      `json:"steps"`
         Button    string   `json:"button"`
         Clicks    int      `json:"clicks"`
         DX        float64  `json:"dx"`
@@ -777,6 +827,7 @@ type batchEvent struct {
         Code      string   `json:"code"`
         Key       string   `json:"key"`
         Text      string   `json:"text"`
+        Keys      []string `json:"keys"`
         Modifiers int      `json:"modifiers"`
         Mods      []string `json:"mods"`
         WaitMs    int      `json:"wait_ms"`
@@ -832,8 +883,25 @@ func (s *Server) apiInputBatch(w http.ResponseWriter, r *http.Request) {
                         if err != nil {
                                 entry["error"] = err.Error()
                         }
+                case "mouse_double":
+                        btn := buttonName(ev.Button)
+                        err := s.batchClick(cdpClient, ev, btn, 2)
+                        entry["ok"] = err == nil
+                        if err != nil {
+                                entry["error"] = err.Error()
+                        }
                 case "mouse_wheel":
                         err := s.batchWheel(cdpClient, ev)
+                        entry["ok"] = err == nil
+                        if err != nil {
+                                entry["error"] = err.Error()
+                        }
+                case "mouse_drag":
+                        btn := buttonName(ev.Button)
+                        if btn == "" {
+                                btn = "left"
+                        }
+                        err := s.batchDrag(cdpClient, ev, btn)
                         entry["ok"] = err == nil
                         if err != nil {
                                 entry["error"] = err.Error()
@@ -858,6 +926,12 @@ func (s *Server) apiInputBatch(w http.ResponseWriter, r *http.Request) {
                         }
                 case "key_type":
                         err := s.batchType(cdpClient, ev)
+                        entry["ok"] = err == nil
+                        if err != nil {
+                                entry["error"] = err.Error()
+                        }
+                case "key_combo":
+                        err := s.batchCombo(cdpClient, ev.Keys)
                         entry["ok"] = err == nil
                         if err != nil {
                                 entry["error"] = err.Error()
@@ -1227,4 +1301,57 @@ func (s *Server) batchType(c *cdp.Client, ev batchEvent) error {
                 return fmt.Errorf("neither cdp nor injector available")
         }
         return s.api.injector.Type(ev.Text)
+}
+
+// batchCombo dispatches a key chord within a batch. It reuses dispatchCombo
+// but pins the CDP client to the one already resolved by the batch caller so
+// we don't re-resolve per event.
+func (s *Server) batchCombo(c *cdp.Client, keys []string) error {
+        if len(keys) == 0 {
+                return fmt.Errorf("keys is required")
+        }
+        ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+        defer cancel()
+        // dispatchCombo uses s.api.getCDP() internally; that returns the same
+        // client as `c` when CDP is connected, so the behaviour is consistent.
+        _ = c
+        _, err := s.dispatchCombo(ctx, keys)
+        return err
+}
+
+// batchDrag performs a drag from (x1,y1) to (x2,y2) within a batch.
+func (s *Server) batchDrag(c *cdp.Client, ev batchEvent, button string) error {
+        steps := ev.Steps
+        if steps <= 0 {
+                steps = 30
+        }
+        if c != nil && button == "left" {
+                ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+                defer cancel()
+                return c.DispatchMouseDrag(ctx, ev.X1, ev.Y1, ev.X2, ev.Y2, steps)
+        }
+        if s.api == nil || s.api.injector == nil {
+                return fmt.Errorf("neither cdp nor injector available")
+        }
+        mask := protocolButtonMask(button)
+        moveEv := protocol.MouseEvent{Type: "mouse", X: int(ev.X1), Y: int(ev.Y1), Mask: 0}
+        if err := s.api.injector.Mouse(moveEv); err != nil {
+                return err
+        }
+        time.Sleep(50 * time.Millisecond)
+        pressEv := protocol.MouseEvent{Type: "mouse", X: int(ev.X1), Y: int(ev.Y1), Mask: mask}
+        if err := s.api.injector.Mouse(pressEv); err != nil {
+                return err
+        }
+        time.Sleep(50 * time.Millisecond)
+        for i := 1; i <= steps; i++ {
+                x := int(ev.X1) + (int(ev.X2)-int(ev.X1))*i/steps
+                y := int(ev.Y1) + (int(ev.Y2)-int(ev.Y1))*i/steps
+                jitter := (i % 3) - 1
+                stepEv := protocol.MouseEvent{Type: "mouse", X: x, Y: y + jitter, Mask: mask}
+                _ = s.api.injector.Mouse(stepEv)
+                time.Sleep(15 * time.Millisecond)
+        }
+        releaseEv := protocol.MouseEvent{Type: "mouse", X: int(ev.X2), Y: int(ev.Y2), Mask: 0}
+        return s.api.injector.Mouse(releaseEv)
 }
