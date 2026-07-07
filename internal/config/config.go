@@ -42,6 +42,11 @@ type Config struct {
         // CDPAddr is the Chrome DevTools Protocol address (e.g. "127.0.0.1:9222").
         // When set, /api/* endpoints can control Chrome via CDP.
         CDPAddr string
+
+        // DataDir is where samvnc-server persists state (currently: the subdomain
+        // picked on first run, so the public URL stays stable across restarts).
+        // Defaults to ~/.samvnc when empty.
+        DataDir string
 }
 
 // TunnelConfig configures the aitun.cc TCP+TLS transport.
@@ -140,6 +145,9 @@ func FromEnv() Config {
         }
         if v := os.Getenv("SAMVNC_CDP_ADDR"); v != "" {
                 c.CDPAddr = v
+        }
+        if v := os.Getenv("SAMVNC_DATA_DIR"); v != "" {
+                c.DataDir = v
         }
 
         return c

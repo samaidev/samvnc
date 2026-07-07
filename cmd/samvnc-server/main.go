@@ -44,6 +44,7 @@ import (
         "github.com/samaidev/samvnc/internal/aitunmgr"
         "github.com/samaidev/samvnc/internal/config"
         "github.com/samaidev/samvnc/internal/server"
+        "github.com/samaidev/samvnc/internal/substore"
         "github.com/samaidev/samvnc/internal/tunnel"
 )
 
@@ -64,6 +65,7 @@ func main() {
         verbose := flag.Bool("verbose", cfg.Verbose, "verbose logging")
         demo := flag.Bool("demo", cfg.Demo, "use the synthetic in-memory desktop backend (headless)")
         cdpAddr := flag.String("cdp-addr", cfg.CDPAddr, "Chrome DevTools Protocol address (e.g. 127.0.0.1:9222)")
+        dataDir := flag.String("data-dir", cfg.DataDir, "directory for persistent state (subdomain info). Defaults to ~/.samvnc. Env: SAMVNC_DATA_DIR")
         flag.Parse()
 
         cfg.ListenAddr = *listen
@@ -79,10 +81,20 @@ func main() {
         cfg.Verbose = *verbose
         cfg.Demo = *demo
         cfg.CDPAddr = *cdpAddr
+        cfg.DataDir = *dataDir
 
         if err := cfg.Validate(); err != nil {
                 fmt.Fprintln(os.Stderr, "config error:", err)
                 os.Exit(2)
+        }
+
+        // Default DataDir to ~/.samvnc if not set.
+        if cfg.DataDir == "" {
+                if home, err := os.UserHomeDir(); err == nil {
+                        cfg.DataDir = home + "/.samvnc"
+                } else {
+                        cfg.DataDir = ".samvnc"
+                }
         }
 
         log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -137,21 +149,80 @@ func startTunnel(cfg config.Config, port int, srv *server.Server, agentToken str
         // the aitun.cc management API. This gives samvnc a "just run" experience
         // similar to samcommand.
         if tunnelToken == "" {
+                // Resolve the subdomain name with the same precedence as samcommand:
+                //   a. Explicit --aitun-subdomain / SAMVNC_AITUN_SUBDOMAIN
+                //   b. Persisted subdomain from a previous successful run (stable URL)
+                //   c. Fresh auto-generated name (first run)
                 subName := cfg.Tunnel.Subdomain
+                subdomainFromState := false
+                if subName == "" {
+                        if saved, err := substore.Load(cfg.DataDir); err != nil {
+                                log.Printf("[samvnc] warning: could not load saved subdomain: %v", err)
+                        } else if saved != nil {
+                                subName = saved.Name
+                                subdomainFromState = true
+                                log.Printf("[samvnc] reusing saved subdomain: %s (registered %s)",
+                                        saved.Name, saved.RegisteredAt)
+                        }
+                }
                 if subName == "" {
                         subName = generateSubdomain()
                         log.Printf("[samvnc] no subdomain set, generated: %s", subName)
                 }
 
                 client := aitunmgr.New(agentToken)
-                ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-                sub, err := client.EnsureSubdomain(ctx, subName, "t.aitun.cc", true)
-                cancel()
-                if err != nil {
+
+                // Register / reuse with a small retry loop. On conflict we generate
+                // a fresh name (only when the original was auto-generated, not when
+                // the user explicitly asked for a specific name).
+                var sub *aitunmgr.Subdomain
+                for attempt := 1; ; attempt++ {
+                        ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+                        s, err := client.EnsureSubdomain(ctx, subName, "t.aitun.cc", true)
+                        cancel()
+                        if err == nil {
+                                sub = s
+                                break
+                        }
+                        if aitunmgr.IsConflict(err) && cfg.Tunnel.Subdomain == "" && !subdomainFromState && attempt < 4 {
+                                oldName := subName
+                                subName = generateSubdomain()
+                                log.Printf("[samvnc] subdomain %q taken, retrying with: %s", oldName, subName)
+                                continue
+                        }
+                        // Saved subdomain no longer exists on aitun.cc side: clear state
+                        // and retry once with a fresh name.
+                        if subdomainFromState && attempt < 2 {
+                                log.Printf("[samvnc] saved subdomain %q no longer usable (%v); generating a fresh one",
+                                        subName, err)
+                                _ = substore.Clear(cfg.DataDir)
+                                subdomainFromState = false
+                                subName = generateSubdomain()
+                                continue
+                        }
                         log.Printf("[samvnc] auto-register subdomain failed: %v", err)
                         log.Printf("[samvnc] continuing without tunnel. Set --aitun-token or --aitun-agent-token manually.")
                         return
                 }
+
+                // Persist the subdomain so the next run reuses the same public URL.
+                // Skip when the user explicitly passed --aitun-subdomain (they manage
+                // the name themselves).
+                if cfg.Tunnel.Subdomain == "" {
+                        info := &substore.Info{
+                                Name:       sub.Subdomain,
+                                ID:         sub.ID,
+                                DomainBase: sub.DomainBase,
+                                DomainURL:  sub.DomainURL,
+                                Token:      sub.Token,
+                        }
+                        if err := substore.Save(cfg.DataDir, info); err != nil {
+                                log.Printf("[samvnc] warning: could not persist subdomain state: %v", err)
+                        } else if p, _ := substore.Path(cfg.DataDir); p != "" {
+                                log.Printf("[samvnc] subdomain state saved to %s", p)
+                        }
+                }
+
                 tunnelToken = sub.Token
                 log.Printf("[samvnc] subdomain ready: %s (id=%s)", sub.DomainURL, sub.ID)
                 log.Printf("[samvnc] public URL: https://%s", sub.DomainURL)
@@ -185,6 +256,9 @@ func startTunnel(cfg config.Config, port int, srv *server.Server, agentToken str
 }
 
 // generateSubdomain returns a unique, DNS-safe name like "samvnc-<host>-<rand>".
+//
+// The random suffix is 5 bytes (10 hex chars, 40 bits of entropy). See the
+// comment on the samcommand equivalent for collision-probability math.
 func generateSubdomain() string {
         host, err := os.Hostname()
         if err != nil || host == "" {
@@ -194,7 +268,7 @@ func generateSubdomain() string {
         if len(host) > 16 {
                 host = host[:16]
         }
-        return fmt.Sprintf("samvnc-%s-%s", host, randHex(3))
+        return fmt.Sprintf("samvnc-%s-%s", host, randHex(5))
 }
 
 func sanitize(s string) string {
