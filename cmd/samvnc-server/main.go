@@ -8,23 +8,28 @@
 //        samvnc-server [flags]
 //
 //      Flags:
-//        -listen <addr>        local WebSocket bind address (default 127.0.0.1:8090)
+//        -listen <addr>        local WebSocket bind address (default 127.0.0.1:8091)
 //        -quality low|medium|high
 //        -mode auto|p2p|relay
 //        -fps <n>              frame rate cap (default 30)
 //        -token <token>        client auth token (empty disables auth)
 //        -tunnel on|off        spawn the aitun.cc client (default on)
-//        -aitun-token <token>  aitun.cc account token for permanent subdomains
-//        -aitun-subdomain <s>  request a specific short subdomain
+//        -aitun-agent-token <t>  aitun.cc agent token (aitagt_...) for auto subdomain
+//        -aitun-subdomain <s>  request a specific short subdomain (auto-generates if empty)
+//        -aitun-token <token>  aitun.cc tunnel token (ait_...) — overrides auto-register
 //        -tcp-only             use a TCP-only tunnel (no HTTP pass-through)
 //        -no-clipboard         disable clipboard sharing
 //        -verbose              verbose logging
+//        -demo                 use synthetic in-memory desktop (headless)
+//        -cdp-addr <addr>      Chrome DevTools Protocol address
 //
 //      Environment variables (SAMVNC_*) override the defaults; see config.FromEnv.
 package main
 
 import (
         "context"
+        "crypto/rand"
+        "encoding/hex"
         "flag"
         "fmt"
         "log"
@@ -32,9 +37,11 @@ import (
         "os"
         "os/signal"
         "strconv"
+        "strings"
         "syscall"
         "time"
 
+        "github.com/samaidev/samvnc/internal/aitunmgr"
         "github.com/samaidev/samvnc/internal/config"
         "github.com/samaidev/samvnc/internal/server"
         "github.com/samaidev/samvnc/internal/tunnel"
@@ -49,8 +56,9 @@ func main() {
         fps := flag.Int("fps", cfg.MaxFPS, "frame rate cap")
         token := flag.String("token", cfg.AuthToken, "client auth token (empty disables)")
         tunnelOn := flag.Bool("tunnel", cfg.Tunnel.Enabled, "spawn the aitun.cc client")
-        aitunToken := flag.String("aitun-token", cfg.Tunnel.Token, "aitun.cc account token")
-        aitunSub := flag.String("aitun-subdomain", cfg.Tunnel.Subdomain, "aitun.cc subdomain")
+        aitunAgentToken := flag.String("aitun-agent-token", "", "aitun.cc agent token (aitagt_...) for auto subdomain registration")
+        aitunSub := flag.String("aitun-subdomain", cfg.Tunnel.Subdomain, "aitun.cc subdomain name (auto-generated if empty)")
+        aitunToken := flag.String("aitun-token", cfg.Tunnel.Token, "aitun.cc tunnel token (ait_...) — overrides auto-register")
         tcpOnly := flag.Bool("tcp-only", cfg.Tunnel.TCPOnly, "use a TCP-only tunnel")
         noClip := flag.Bool("no-clipboard", !cfg.Clipboard, "disable clipboard sharing")
         verbose := flag.Bool("verbose", cfg.Verbose, "verbose logging")
@@ -105,7 +113,7 @@ func main() {
         log.Printf("local UI:   http://%s", cfg.ListenAddr)
 
         if cfg.Tunnel.Enabled {
-                startTunnel(cfg, port, srv)
+                startTunnel(cfg, port, srv, *aitunAgentToken)
         } else {
                 log.Printf("tunnel disabled; open http://%s in a browser on this host", cfg.ListenAddr)
         }
@@ -121,10 +129,38 @@ func main() {
         _ = httpSrv.Shutdown(ctx)
 }
 
-func startTunnel(cfg config.Config, port int, srv *server.Server) {
+func startTunnel(cfg config.Config, port int, srv *server.Server, agentToken string) {
+        tunnelToken := cfg.Tunnel.Token
+
+        // If no tunnel token (ait_...) is provided but we have an agent token
+        // (aitagt_...) or the built-in default, auto-register a subdomain via
+        // the aitun.cc management API. This gives samvnc a "just run" experience
+        // similar to samcommand.
+        if tunnelToken == "" {
+                subName := cfg.Tunnel.Subdomain
+                if subName == "" {
+                        subName = generateSubdomain()
+                        log.Printf("[samvnc] no subdomain set, generated: %s", subName)
+                }
+
+                client := aitunmgr.New(agentToken)
+                ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+                sub, err := client.EnsureSubdomain(ctx, subName, "t.aitun.cc", true)
+                cancel()
+                if err != nil {
+                        log.Printf("[samvnc] auto-register subdomain failed: %v", err)
+                        log.Printf("[samvnc] continuing without tunnel. Set --aitun-token or --aitun-agent-token manually.")
+                        return
+                }
+                tunnelToken = sub.Token
+                log.Printf("[samvnc] subdomain ready: %s (id=%s)", sub.DomainURL, sub.ID)
+                log.Printf("[samvnc] public URL: https://%s", sub.DomainURL)
+                srv.SetRelayURL("https://" + sub.DomainURL)
+        }
+
         tcfg := tunnel.Config{
                 Binary:    cfg.Tunnel.Binary,
-                Token:     cfg.Tunnel.Token,
+                Token:     tunnelToken,
                 LocalPort: port,
                 TCPOnly:   cfg.Tunnel.TCPOnly,
                 Subdomain: cfg.Tunnel.Subdomain,
@@ -134,7 +170,7 @@ func startTunnel(cfg config.Config, port int, srv *server.Server) {
         }
         t, err := tunnel.Start(tcfg, 30*time.Second)
         if err != nil {
-                log.Printf("tunnel: %v (continuing without public URL; use SAMVNC_TUNNEL=off or install aitun)", err)
+                log.Printf("tunnel: %v (continuing without public URL; use --tunnel off or install aitun)", err)
                 return
         }
         if u := t.URL(); u != "" {
@@ -148,6 +184,50 @@ func startTunnel(cfg config.Config, port int, srv *server.Server) {
         }()
 }
 
+// generateSubdomain returns a unique, DNS-safe name like "samvnc-<host>-<rand>".
+func generateSubdomain() string {
+        host, err := os.Hostname()
+        if err != nil || host == "" {
+                host = "agent"
+        }
+        host = sanitize(host)
+        if len(host) > 16 {
+                host = host[:16]
+        }
+        return fmt.Sprintf("samvnc-%s-%s", host, randHex(3))
+}
+
+func sanitize(s string) string {
+        s = strings.ToLower(strings.TrimSpace(s))
+        var b strings.Builder
+        prevDash := false
+        for _, r := range s {
+                switch {
+                case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+                        b.WriteRune(r)
+                        prevDash = false
+                default:
+                        if !prevDash && b.Len() > 0 {
+                                b.WriteRune('-')
+                                prevDash = true
+                        }
+                }
+        }
+        out := strings.Trim(b.String(), "-")
+        if out == "" {
+                out = "agent"
+        }
+        return out
+}
+
+func randHex(n int) string {
+        b := make([]byte, n)
+        if _, err := rand.Read(b); err != nil {
+                return "000000"
+        }
+        return hex.EncodeToString(b)
+}
+
 func portFromAddr(addr string) int {
         for i := len(addr) - 1; i >= 0; i-- {
                 if addr[i] == ':' {
@@ -155,5 +235,5 @@ func portFromAddr(addr string) int {
                         return n
                 }
         }
-        return 8090
+        return 8091
 }
