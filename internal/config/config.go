@@ -72,7 +72,7 @@ type TunnelConfig struct {
 // Default returns a sane default configuration.
 func Default() Config {
         return Config{
-                ListenAddr:     "127.0.0.1:8090",
+                ListenAddr:     "127.0.0.1:8091",
                 DefaultQuality: "medium",
                 MaxFPS:         15,
                 Clipboard:      true,
