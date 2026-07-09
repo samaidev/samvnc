@@ -33,6 +33,7 @@ import (
         "flag"
         "fmt"
         "log"
+        "net"
         "net/http"
         "os"
         "os/signal"
@@ -103,9 +104,31 @@ func main() {
 
         srv := server.New(cfg, "")
 
-        // HTTP server.
+        // Bind the listening socket up front so we can retry on a busy port.
+        // If the configured port (default 8091) is already in use, we try
+        // port+1, port+2, ... up to 5 attempts before giving up (mirroring
+        // samcommand's behavior). The actual port that succeeded is propagated
+        // back into cfg.ListenAddr / cfg.Tunnel.LocalPort so the aitun tunnel
+        // connects to the right local port.
+        const portRetryCount = 5
+        ln, actualAddr, err := pickListener(cfg.ListenAddr, portRetryCount)
+        if err != nil {
+                log.Fatalf("bind local WebSocket address (tried %s + %d attempts): %v",
+                        cfg.ListenAddr, portRetryCount, err)
+        }
+        if actualAddr != cfg.ListenAddr {
+                log.Printf("[samvnc] address %s was busy, using %s instead", cfg.ListenAddr, actualAddr)
+                cfg.ListenAddr = actualAddr
+                // Also update the tunnel's local port so aitun forwards to the right place.
+                if cfg.Tunnel.LocalPort == 0 {
+                        cfg.Tunnel.LocalPort = portFromAddr(actualAddr)
+                }
+        }
+        log.Printf("local UI:   http://%s", actualAddr)
+
+        // HTTP server. We Serve() on the already-bound listener so that the
+        // retry logic above can pick a free port.
         httpSrv := &http.Server{
-                Addr:    cfg.ListenAddr,
                 Handler: srv.Handler(),
         }
 
@@ -115,14 +138,12 @@ func main() {
                 port = cfg.Tunnel.LocalPort
         }
 
-        // Start the aitun.cc tunnel (optional). The HTTP server must be up first
-        // so the tunnel has something to forward to.
+        // Start the HTTP server on the bound listener.
         go func() {
-                if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+                if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
                         log.Fatalf("http: %v", err)
                 }
         }()
-        log.Printf("local UI:   http://%s", cfg.ListenAddr)
 
         if cfg.Tunnel.Enabled {
                 startTunnel(cfg, port, srv, *aitunAgentToken)
@@ -310,4 +331,63 @@ func portFromAddr(addr string) int {
                 }
         }
         return 8091
+}
+
+// pickListener tries to bind a TCP listener on baseAddr (e.g. "127.0.0.1:8091"),
+// and on failure retries with port+1, port+2, ... up to maxRetries attempts.
+//
+// This avoids the "address already in use" hard failure when the default port
+// (8091) is already taken by another process (e.g. another samvnc instance, or
+// a leftover process from a previous run). The caller propagates the returned
+// actual address back into cfg.ListenAddr so the aitun tunnel is started
+// against the correct local port.
+//
+// On success the returned net.Listener is already bound; the caller must Serve
+// on it. On exhaustion of retries the last bind error is returned.
+//
+// This mirrors the equivalent pickListener in samaidev/samcommand/main.go so
+// samvnc and samcommand behave consistently on busy ports.
+func pickListener(baseAddr string, maxRetries int) (net.Listener, string, error) {
+        if maxRetries < 1 {
+                maxRetries = 1
+        }
+
+        // Split baseAddr into "host:port" so we can increment the port.
+        host, portStr, err := net.SplitHostPort(baseAddr)
+        if err != nil {
+                // baseAddr might be just ":port" or "port" — try to recover.
+                // If we can't parse it, fall back to one attempt with the raw addr.
+                host = "127.0.0.1"
+                portStr = ""
+        }
+        basePort, _ := strconv.Atoi(portStr)
+        if basePort == 0 {
+                basePort = 8091
+        }
+
+        var lastErr error
+        for i := 0; i < maxRetries; i++ {
+                port := basePort + i
+                if port <= 0 || port > 65535 {
+                        lastErr = fmt.Errorf("port %d out of valid range (1-65535)", port)
+                        break
+                }
+                tryAddr := net.JoinHostPort(host, strconv.Itoa(port))
+                ln, err := net.Listen("tcp", tryAddr)
+                if err != nil {
+                        log.Printf("[samvnc] address %s unavailable (%v); ", tryAddr, err)
+                        if i+1 < maxRetries {
+                                log.Printf("retrying on %d...", port+1)
+                        } else {
+                                log.Printf("no more retries.")
+                        }
+                        lastErr = err
+                        continue
+                }
+                return ln, tryAddr, nil
+        }
+        if lastErr == nil {
+                lastErr = fmt.Errorf("no available port in range %d-%d", basePort, basePort+maxRetries-1)
+        }
+        return nil, "", fmt.Errorf("could not bind after %d attempts: %w", maxRetries, lastErr)
 }
