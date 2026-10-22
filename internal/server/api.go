@@ -311,9 +311,10 @@ func (s *Server) apiScreenshot(w http.ResponseWriter, r *http.Request) {
                 return
         }
         w.Header().Set("Content-Type", "image/png")
-        // Encode as PNG
+        // Encode as PNG - if encoding fails we cannot send an HTTP error anymore
+        // (headers already written), so just log it.
         if err := encodePNG(w, img); err != nil {
-                http.Error(w, fmt.Sprintf(`{"error":"encode: %s"}`, err), http.StatusInternalServerError)
+                log.Printf("[api] screenshot encode: %v", err)
                 return
         }
 }

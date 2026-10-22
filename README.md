@@ -232,12 +232,57 @@ screen frame in the response.
 ## Build
 
 ```bash
-make
-# → bin/samvnc-server
-# → bin/desktop-controller (optional, standalone X11 control daemon)
+make            # → bin/samvnc-server
+make tray       # → bin/samvnc-tray (system tray app)
+make all-build  # → both server and tray
 ```
 
-Requires Go 1.21+ and libx11-dev (for XTEST/XGetImage).
+Requires Go 1.21+. On Linux, libx11-dev is needed (for XTEST/XGetImage).
+The tray app uses the native Win32 API on Windows (no CGO required).
+
+## System Tray (samvnc-tray)
+
+The tray app (`cmd/samvnc-tray`) provides a system tray icon that manages
+the `samvnc-server` subprocess. It auto-starts the server on launch and
+provides a context menu with:
+
+- **Start / Stop** — mutually exclusive; starts or stops the server subprocess
+- **Auto-start on boot** — toggle (mutually exclusive); registers the tray
+  binary for boot-time startup via Windows Registry (Win), LaunchAgent (macOS),
+  or `.desktop` autostart file (Linux)
+- **Settings...** — opens `~/.samvnc/settings.json` in the default text editor
+  where you can set:
+  - `agent_token` — your aitun.cc agent token (`aitagt_...`) for a permanent
+    subdomain. If empty, the built-in default is used (ephemeral subdomain).
+  - `subdomain` — request a specific subdomain name (e.g. `my-pc`). If empty,
+    one is auto-generated.
+  - `auth_token` — the client auth token. Auto-generated on first run.
+  - `auto_start` — whether to start on boot.
+- **Copy Address** — copies the public URL with `?token=xxx` to the clipboard,
+  ready to paste into any browser
+- **Exit** — stops the server and quits
+
+### Settings file
+
+Located at `~/.samvnc/settings.json`:
+
+```json
+{
+  "agent_token": "",
+  "subdomain": "",
+  "auth_token": "e22542fbfdcffd7d92b6e93cd85a7718",
+  "auto_start": false
+}
+```
+
+When `agent_token` is empty, the built-in default aitun.cc agent token is
+used, which gives you an ephemeral subdomain on `t.aitun.cc`. Set your own
+agent token to bind a permanent subdomain to your account.
+
+The public URL with token looks like:
+`https://samvnc-wei-abc123.t.aitun.cc?token=e22542fbfdcffd7d92b6e93cd85a7718`
+
+Open it in any browser to access the remote desktop.
 
 ## Run
 
@@ -306,6 +351,7 @@ curl -X POST http://localhost:8128/api/cdp/drag \
 samvnc/
 ├── cmd/
 │   ├── samvnc-server/main.go    # main server binary
+│   ├── samvnc-tray/main.go      # system tray app (manages server subprocess)
 │   ├── desktop-controller/main.go  # standalone X11 control daemon (optional)
 │   ├── fwd/main.go              # port-forwarding helper
 │   └── wstest/main.go           # WebSocket test client
@@ -317,15 +363,20 @@ samvnc/
 │   │   ├── api.go               # /api/* HTTP endpoints
 │   │   ├── api_desktop.go       # /api/mouse/* + /api/key/* remote-desktop API
 │   │   └── assets/              # browser client (HTML/JS/CSS)
+│   ├── tray/                    # cross-platform system tray (Win32 Shell_NotifyIcon)
+│   ├── settings/                # tray settings persistence (~/.samvnc/settings.json)
+│   ├── autostart/               # boot-time auto-start (Win Registry / macOS LaunchAgent / Linux .desktop)
 │   ├── cdp/
 │   │   ├── cdp.go               # CDP client: Eval, Navigate, Cookies, Dispatch* (mouse/key/wheel)
 │   │   └── frame.go             # CDP frame tree → isolated world eval
-│   ├── input/                   # X11 XTEST input injection
-│   ├── capture/                 # X11 XGetImage screen capture
-│   ├── clipboard/               # X11 clipboard sync
+│   ├── input/                   # X11 XTEST / Windows SendInput injection
+│   ├── capture/                 # X11 XGetImage / Windows GDI BitBlt capture
+│   ├── clipboard/               # X11 / Windows clipboard sync
 │   ├── compress/                # JPEG/PNG encoders
 │   ├── protocol/                # wire protocol definitions
 │   ├── config/                  # CLI flag parsing
+│   ├── aitunmgr/                # aitun.cc management API client
+│   ├── substore/                # subdomain state persistence
 │   ├── relay/                   # aitun relay integration
 │   └── tunnel/                  # aitun client
 ├── examples/
