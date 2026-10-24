@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -14,7 +15,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// trayLog writes debug logs to ~/.samvnc/tray.log
+// ============================================================
+// trayLog — debug logging to ~/.samvnc/tray.log
+// ============================================================
+
 var trayLogFile *os.File
 
 func trayLog(format string, args ...interface{}) {
@@ -41,161 +45,215 @@ func initTrayLog() {
 	}
 }
 
-// Windows message constants.
-const (
-	WM_USER         = 0x0400
-	WM_TRAYICON     = WM_USER + 1
-	WM_LBUTTONUP    = 0x0202
-	WM_LBUTTONDBLCLK = 0x0203
-	WM_RBUTTONUP    = 0x0205
-	WM_CONTEXTMENU  = 0x007B
-	WM_COMMAND      = 0x0111
-	WM_DESTROY      = 0x0002
-	WM_QUIT         = 0x0012
-	WM_CLOSE        = 0x0010
-
-	NIM_ADD     = 0x00000000
-	NIM_MODIFY  = 0x00000001
-	NIM_DELETE  = 0x00000002
-	NIM_SETVERSION = 0x0000000A
-
-	NIF_MESSAGE = 0x00000001
-	NIF_ICON    = 0x00000002
-	NIF_TIP     = 0x00000004
-	NIF_INFO    = 0x00000010
-	NIF_GUID    = 0x00000020
-	NIF_SHOWTIP = 0x00000080
-
-	NOTIFYICON_VERSION_4 = 4
-
-	IDI_APPLICATION = 32512
-
-	NIIF_INFO    = 0x00000001
-	NIIF_WARNING = 0x00000002
-	NIIF_ERROR   = 0x00000003
-
-	LR_LOADFROMFILE = 0x00000010
-	IMAGE_ICON      = 1
-
-	TPM_RIGHTBUTTON = 0x0002
-	TPM_BOTTOMALIGN = 0x0020
-	TPM_LEFTALIGN   = 0x0000
-
-	MF_SEPARATOR = 0x0800
-	MF_STRING    = 0x0000
-	MF_DISABLED  = 0x0002
-	MF_GRAYED    = 0x0001
-	MF_CHECKED   = 0x0008
-	MF_UNCHECKED = 0x0000
-
-	CS_HREDRAW = 0x0002
-	CS_VREDRAW = 0x0001
-
-	WS_OVERLAPPEDWINDOW = 0x00CF0000
-	SW_HIDE              = 0
-	CW_USEDEFAULT        = 0x80000000
-)
-
-// NOTIFYICONDATAW matches the Windows NOTIFYICONDATAW structure for amd64.
-type NOTIFYICONDATAW struct {
-	CbSize           uint32
-	HWnd             windows.HWND
-	UID              uint32
-	Flags            uint32
-	CallbackMessage  uint32
-	HIcon            windows.Handle
-	Tip              [128]uint16
-	State            uint32
-	StateMask        uint32
-	Info             [256]uint16
-	TimeoutOrVersion uint32
-	InfoTitle        [64]uint16
-	InfoFlags        uint32
-	GuidItem         windows.GUID
-	BalloonIcon      windows.Handle
-}
-
-// MSG is the Windows message structure.
-type MSG struct {
-	HWnd    windows.HWND
-	Message uint32
-	WParam  uintptr
-	LParam  uintptr
-	Time    uint32
-	Pt      struct{ X, Y int32 }
-}
-
-// WNDCLASSEXW matches the Windows WNDCLASSEXW structure for amd64.
-type WNDCLASSEXW struct {
-	Size          uint32
-	Style         uint32
-	LpfnWndProc   uintptr
-	CbClsExtra    int32
-	CbWndExtra    int32
-	HInstance     windows.Handle
-	HIcon         windows.Handle
-	HCursor       windows.Handle
-	HbrBackground windows.Handle
-	LpszMenuName  *uint16
-	LpszClassName *uint16
-	HIconSm       windows.Handle
-}
+// ============================================================
+// Lazy-loaded DLL procs (exactly as pcguy does)
+// ============================================================
 
 var (
-	modShell32 = windows.NewLazySystemDLL("shell32.dll")
-	modUser32   = windows.NewLazySystemDLL("user32.dll")
-	modKernel32 = windows.NewLazySystemDLL("kernel32.dll")
+	g32                     = windows.NewLazySystemDLL("Gdi32.dll")
+	pCreateCompatibleBitmap = g32.NewProc("CreateCompatibleBitmap")
+	pCreateCompatibleDC     = g32.NewProc("CreateCompatibleDC")
+	pDeleteDC               = g32.NewProc("DeleteDC")
+	pSelectObject           = g32.NewProc("SelectObject")
 
-	procShellNotifyIcon      = modShell32.NewProc("Shell_NotifyIconW")
-	procCreatePopupMenu      = modUser32.NewProc("CreatePopupMenu")
-	procAppendMenuW          = modUser32.NewProc("AppendMenuW")
-	procTrackPopupMenu       = modUser32.NewProc("TrackPopupMenu")
-	procDestroyMenu          = modUser32.NewProc("DestroyMenu")
-	procLoadIconW            = modUser32.NewProc("LoadIconW")
-	procLoadImageW           = modUser32.NewProc("LoadImageW")
-	procRegisterClassExW     = modUser32.NewProc("RegisterClassExW")
-	procCreateWindowExW      = modUser32.NewProc("CreateWindowExW")
-	procGetMessageW          = modUser32.NewProc("GetMessageW")
-	procDispatchMessageW     = modUser32.NewProc("DispatchMessageW")
-	procTranslateMessage     = modUser32.NewProc("TranslateMessage")
-	procDefWindowProcW       = modUser32.NewProc("DefWindowProcW")
-	procPostQuitMessage      = modUser32.NewProc("PostQuitMessage")
-	procPostMessageW         = modUser32.NewProc("PostMessageW")
-	procGetCursorPos         = modUser32.NewProc("GetCursorPos")
-	procSetForegroundWindow  = modUser32.NewProc("SetForegroundWindow")
-	procGetForegroundWindow  = modUser32.NewProc("GetForegroundWindow")
-	procAllowSetForegroundWindow = modUser32.NewProc("AllowSetForegroundWindow")
-	procAttachThreadInput    = modUser32.NewProc("AttachThreadInput")
-	procGetWindowThreadProcessId = modUser32.NewProc("GetWindowThreadProcessId")
-	procBringWindowToTop     = modUser32.NewProc("BringWindowToTop")
-	procIsHungAppWindow      = modUser32.NewProc("IsHungAppWindow")
-	procGetCurrentThreadId   = modKernel32.NewProc("GetCurrentThreadId")
-	procRegisterWindowMessageW = modUser32.NewProc("RegisterWindowMessageW")
-	procShowWindow           = modUser32.NewProc("ShowWindow")
-	procUpdateWindow         = modUser32.NewProc("UpdateWindow")
-	procGetModuleHandleW     = modKernel32.NewProc("GetModuleHandleW")
-	procLoadCursorW          = modUser32.NewProc("LoadCursorW")
-	procCreateIconIndirect   = modUser32.NewProc("CreateIconIndirect")
+	k32                 = windows.NewLazySystemDLL("Kernel32.dll")
+	pGetModuleHandle    = k32.NewProc("GetModuleHandleW")
+	pGetCurrentThreadId = k32.NewProc("GetCurrentThreadId")
+
+	s32              = windows.NewLazySystemDLL("Shell32.dll")
+	pShellNotifyIcon = s32.NewProc("Shell_NotifyIconW")
+
+	u32                       = windows.NewLazySystemDLL("User32.dll")
+	pCreateMenu               = u32.NewProc("CreateMenu")
+	pCreatePopupMenu          = u32.NewProc("CreatePopupMenu")
+	pCreateWindowEx           = u32.NewProc("CreateWindowExW")
+	pDefWindowProc            = u32.NewProc("DefWindowProcW")
+	pRemoveMenu               = u32.NewProc("RemoveMenu")
+	pDestroyWindow            = u32.NewProc("DestroyWindow")
+	pDispatchMessage          = u32.NewProc("DispatchMessageW")
+	pDrawIconEx               = u32.NewProc("DrawIconEx")
+	pAttachThreadInput        = u32.NewProc("AttachThreadInput")
+	pBringWindowToTop         = u32.NewProc("BringWindowToTop")
+	pGetCursorPos             = u32.NewProc("GetCursorPos")
+	pGetDC                    = u32.NewProc("GetDC")
+	pGetForegroundWindow      = u32.NewProc("GetForegroundWindow")
+	pGetMessage               = u32.NewProc("GetMessageW")
+	pGetSystemMetrics         = u32.NewProc("GetSystemMetrics")
+	pGetWindowThreadProcessId = u32.NewProc("GetWindowThreadProcessId")
+	pIsHungAppWindow          = u32.NewProc("IsHungAppWindow")
+	pInsertMenuItem           = u32.NewProc("InsertMenuItemW")
+	pLoadCursor               = u32.NewProc("LoadCursorW")
+	pLoadIcon                 = u32.NewProc("LoadIconW")
+	pLoadImage                = u32.NewProc("LoadImageW")
+	pPostMessage              = u32.NewProc("PostMessageW")
+	pPostQuitMessage          = u32.NewProc("PostQuitMessage")
+	pRegisterClass            = u32.NewProc("RegisterClassExW")
+	pRegisterWindowMessage    = u32.NewProc("RegisterWindowMessageW")
+	pReleaseDC                = u32.NewProc("ReleaseDC")
+	pSetForegroundWindow      = u32.NewProc("SetForegroundWindow")
+	pAllowSetForegroundWindow = u32.NewProc("AllowSetForegroundWindow")
+	pSetMenuInfo               = u32.NewProc("SetMenuInfo")
+	pSetMenuItemInfo           = u32.NewProc("SetMenuItemInfoW")
+	pShowWindow               = u32.NewProc("ShowWindow")
+	pTrackPopupMenu           = u32.NewProc("TrackPopupMenu")
+	pTranslateMessage         = u32.NewProc("TranslateMessage")
+	pUnregisterClass          = u32.NewProc("UnregisterClassW")
+	pUpdateWindow             = u32.NewProc("UpdateWindow")
+	pCreateIconIndirect       = u32.NewProc("CreateIconIndirect")
 )
 
-// Global registry to route WindowProc callbacks to the correct Tray instance.
-var (
-	registryMu sync.Mutex
-	registry   = map[windows.HWND]*winTray{}
-)
+// ============================================================
+// Structures (copied from pcguy)
+// ============================================================
 
-// winTray implements Tray on Windows.
+type wndClassEx struct {
+	Size, Style                        uint32
+	WndProc                            uintptr
+	ClsExtra, WndExtra                 int32
+	Instance, Icon, Cursor, Background windows.Handle
+	MenuName, ClassName                *uint16
+	IconSm                             windows.Handle
+}
+
+func (w *wndClassEx) register() error {
+	w.Size = uint32(unsafe.Sizeof(*w))
+	res, _, err := pRegisterClass.Call(uintptr(unsafe.Pointer(w)))
+	if res == 0 {
+		return err
+	}
+	return nil
+}
+
+func (w *wndClassEx) unregister() error {
+	res, _, err := pUnregisterClass.Call(
+		uintptr(unsafe.Pointer(w.ClassName)),
+		uintptr(w.Instance),
+	)
+	if res == 0 {
+		return err
+	}
+	return nil
+}
+
+// notifyIconData — NOTE: Timeout and Version are separate fields (NOT a union).
+// This matches pcguy's definition. The struct is 984 bytes on amd64,
+// but CbSize is set to unsafe.Sizeof which Windows accepts.
+type notifyIconData struct {
+	Size                       uint32
+	Wnd                        windows.Handle
+	ID, Flags, CallbackMessage uint32
+	Icon                       windows.Handle
+	Tip                        [128]uint16
+	State, StateMask           uint32
+	Info                       [256]uint16
+	Timeout, Version           uint32
+	InfoTitle                  [64]uint16
+	InfoFlags                  uint32
+	GuidItem                   windows.GUID
+	BalloonIcon                windows.Handle
+}
+
+func (nid *notifyIconData) add() error {
+	const NIM_ADD = 0x00000000
+	res, _, err := pShellNotifyIcon.Call(
+		uintptr(NIM_ADD),
+		uintptr(unsafe.Pointer(nid)),
+	)
+	if res == 0 {
+		return err
+	}
+	return nil
+}
+
+func (nid *notifyIconData) modify() error {
+	const NIM_MODIFY = 0x00000001
+	res, _, err := pShellNotifyIcon.Call(
+		uintptr(NIM_MODIFY),
+		uintptr(unsafe.Pointer(nid)),
+	)
+	if res == 0 {
+		return err
+	}
+	// Re-set version after every modify (pcguy's keepalive trick).
+	nid.setVersion()
+	return nil
+}
+
+func (nid *notifyIconData) delete() error {
+	const NIM_DELETE = 0x00000002
+	res, _, err := pShellNotifyIcon.Call(
+		uintptr(NIM_DELETE),
+		uintptr(unsafe.Pointer(nid)),
+	)
+	if res == 0 {
+		return err
+	}
+	return nil
+}
+
+func (nid *notifyIconData) setVersion() error {
+	const NIM_SETVERSION = 0x0000000A
+	const NOTIFYICON_VERSION_4 = 4
+	nid.Version = NOTIFYICON_VERSION_4
+	nid.Size = uint32(unsafe.Sizeof(*nid))
+	res, _, err := pShellNotifyIcon.Call(
+		uintptr(NIM_SETVERSION),
+		uintptr(unsafe.Pointer(nid)),
+	)
+	if res == 0 {
+		return err
+	}
+	return nil
+}
+
+type menuItemInfo struct {
+	Size, Mask, Type, State     uint32
+	ID                          uint32
+	SubMenu, Checked, Unchecked windows.Handle
+	ItemData                    uintptr
+	TypeData                    *uint16
+	Cch                         uint32
+	BMPItem                     windows.Handle
+}
+
+type point struct {
+	X, Y int32
+}
+
+// ============================================================
+// winTray — the tray implementation (mirrors pcguy's winTray)
+// ============================================================
+
 type winTray struct {
-	hwnd            windows.HWND
-	menuItems       []MenuItem
-	callback        func(string)
-	tooltip         string
-	iconAdded       bool
-	menuIDMap       map[uint32]string
-	nextMenuID      uint32
-	nid             *NOTIFYICONDATAW
-	muNID           sync.Mutex
+	instance,
+	icon,
+	cursor,
+	window windows.Handle
+
+	loadedImages   map[string]windows.Handle
+	muLoadedImages sync.RWMutex
+	menus          map[uint32]windows.Handle
+	muMenus        sync.RWMutex
+	menuOf         map[uint32]windows.Handle
+	muMenuOf       sync.RWMutex
+	menuItemIcons   map[uint32]windows.Handle
+	muMenuItemIcons sync.RWMutex
+	visibleItems   map[uint32][]uint32
+	muVisibleItems sync.RWMutex
+
+	nid   *notifyIconData
+	muNID sync.RWMutex
+	wcex  *wndClassEx
+
+	wmSystrayMessage,
 	wmTaskbarCreated uint32
+
+	// SamVNC-specific fields
+	menuItems  []MenuItem
+	callback   func(string)
+	tooltip    string
+	menuIDMap  map[uint32]string
+	nextMenuID uint32
 }
 
 func newTray() Tray {
@@ -205,40 +263,91 @@ func newTray() Tray {
 	}
 }
 
-// windowProc is the global WindowProc callback.
-func windowProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) uintptr {
-	registryMu.Lock()
-	t := registry[hwnd]
-	registryMu.Unlock()
+// ============================================================
+// Async IPC worker (identical to pcguy)
+// ============================================================
 
-	if t == nil {
-		return defWindowProc(hwnd, msg, wParam, lParam)
+var notifyCh chan func()
+
+func asyncNotify(fn func()) {
+	if notifyCh == nil {
+		fn()
+		return
 	}
-
-	// Log ALL messages for debugging (throttled: skip WM_MOUSEMOVE=0x0200 spam)
-	if msg != 0x0200 {
-		trayLog("[tray] wndProc msg=0x%04X wParam=0x%X lParam=0x%X\n", msg, wParam, lParam)
-	}
-
-	switch msg {
-	case t.nidCallbackMessage():
-		// NOTIFYICON_VERSION_4: notification code is in lParam low 16 bits
-		trayMsg := lParam & 0xFFFF
-		trayLog("[tray] tray msg=0x%04X\n", trayMsg)
-		switch trayMsg {
-		case WM_RBUTTONUP, WM_CONTEXTMENU:
-			// v4 sends WM_CONTEXTMENU; v0 sends WM_RBUTTONUP. Handle both.
-			trayLog("[tray] right-click -> showMenu\n")
-			t.showMenu()
-			return 0
-		case WM_LBUTTONUP:
-			trayLog("[tray] left-click -> showMenu\n")
-			t.showMenu()
-			return 0
-		case WM_LBUTTONDBLCLK:
-			trayLog("[tray] double-click\n")
-			return 0
+	select {
+	case notifyCh <- fn:
+	default:
+		select {
+		case <-notifyCh:
+		default:
 		}
+		select {
+		case notifyCh <- fn:
+		default:
+		}
+	}
+}
+
+func (t *winTray) asyncModify() {
+	asyncNotify(func() {
+		t.muNID.Lock()
+		if t.nid != nil {
+			t.nid.modify()
+		}
+		t.muNID.Unlock()
+	})
+}
+
+// ============================================================
+// setIcon / setTooltip (from pcguy)
+// ============================================================
+
+func (t *winTray) setIcon(src string) error {
+	const NIF_ICON = 0x00000002
+	h, err := t.loadIconFrom(src)
+	if err != nil {
+		return err
+	}
+	t.muNID.Lock()
+	t.nid.Icon = h
+	t.nid.Flags |= NIF_ICON
+	t.nid.Size = uint32(unsafe.Sizeof(*t.nid))
+	t.muNID.Unlock()
+	t.asyncModify()
+	return nil
+}
+
+func (t *winTray) setTooltip(src string) error {
+	const NIF_TIP = 0x00000004
+	b, err := windows.UTF16FromString(src)
+	if err != nil {
+		return err
+	}
+	t.muNID.Lock()
+	copy(t.nid.Tip[:], b[:])
+	t.nid.Flags |= NIF_TIP
+	t.nid.Size = uint32(unsafe.Sizeof(*t.nid))
+	t.muNID.Unlock()
+	t.asyncModify()
+	return nil
+}
+
+// ============================================================
+// wndProc (from pcguy, adapted for SamVNC)
+// ============================================================
+
+func (t *winTray) wndProc(hWnd windows.Handle, message uint32, wParam, lParam uintptr) (lResult uintptr) {
+	const (
+		WM_RBUTTONUP     = 0x0205
+		WM_LBUTTONUP     = 0x0202
+		WM_LBUTTONDBLCLK = 0x0203
+		WM_CONTEXTMENU   = 0x007B
+		WM_COMMAND       = 0x0111
+		WM_ENDSESSION    = 0x0016
+		WM_CLOSE         = 0x0010
+		WM_DESTROY       = 0x0002
+	)
+	switch message {
 	case WM_COMMAND:
 		menuID := uint32(wParam) & 0xFFFF
 		trayLog("[tray] WM_COMMAND: menuID=%d\n", menuID)
@@ -247,251 +356,604 @@ func windowProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 				trayLog("[tray] callback: itemID=%q\n", itemID)
 				t.callback(itemID)
 			} else {
-				trayLog("[tray] no menuID %d in map (map has %d entries)\n", menuID, len(t.menuIDMap))
+				trayLog("[tray] no menuID %d in map\n", menuID)
 			}
 		}
-		return 0
+	case WM_CLOSE:
+		pDestroyWindow.Call(uintptr(t.window))
+		t.wcex.unregister()
 	case WM_DESTROY:
-		t.removeIcon()
-		procPostQuitMessage.Call(0)
-		return 0
+		defer pPostQuitMessage.Call(uintptr(int32(0)))
+		fallthrough
+	case WM_ENDSESSION:
+		t.muNID.RLock()
+		nid := t.nid
+		t.muNID.RUnlock()
+		if nid != nil {
+			asyncNotify(func() { nid.delete() })
+		}
+	case t.wmSystrayMessage:
+		trayMsg := lParam & 0xFFFF
+		trayLog("[tray] tray msg=0x%04X\n", trayMsg)
+		switch trayMsg {
+		case WM_LBUTTONDBLCLK:
+			// Double-click: could trigger default action
+		case WM_LBUTTONUP:
+			// Single left-click: show menu (SamVNC behavior)
+			trayLog("[tray] left-click -> showMenu\n")
+			t.showMenu()
+		case WM_RBUTTONUP, WM_CONTEXTMENU:
+			trayLog("[tray] right-click -> showMenu\n")
+			t.showMenu()
+		}
 	case t.wmTaskbarCreated:
-		// Explorer restarted — re-add icon.
 		trayLog("[tray] TaskbarCreated -> re-add icon\n")
-		t.reAddIcon()
-		return 0
+		t.muNID.RLock()
+		nid := t.nid
+		t.muNID.RUnlock()
+		if nid != nil {
+			asyncNotify(func() {
+				nid.add()
+				if err := nid.setVersion(); err != nil {
+					trayLog("[tray] taskbarCreated: setVersion err: %v\n", err)
+				} else {
+					trayLog("[tray] taskbarCreated: icon re-added\n")
+				}
+			})
+		}
+	default:
+		lResult, _, _ = pDefWindowProc.Call(
+			uintptr(hWnd),
+			uintptr(message),
+			uintptr(wParam),
+			uintptr(lParam),
+		)
 	}
-
-	return defWindowProc(hwnd, msg, wParam, lParam)
+	return
 }
 
-func (t *winTray) nidCallbackMessage() uint32 {
+// ============================================================
+// initInstance (from pcguy — creates window, NIM_ADD, setVersion)
+// ============================================================
+
+func (t *winTray) initInstance() error {
+	const IDI_APPLICATION = 32512
+	const IDC_ARROW = 32512
+	const SW_HIDE = 0
+	const CW_USEDEFAULT = 0x80000000
+	const (
+		WS_CAPTION     = 0x00C00000
+		WS_MAXIMIZEBOX = 0x00010000
+		WS_MINIMIZEBOX = 0x00020000
+		WS_OVERLAPPED  = 0x00000000
+		WS_SYSMENU     = 0x00080000
+		WS_THICKFRAME  = 0x00040000
+
+		WS_OVERLAPPEDWINDOW = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+	)
+	const (
+		CS_HREDRAW = 0x0002
+		CS_VREDRAW = 0x0001
+	)
+	const NIF_MESSAGE = 0x00000001
+	const WM_USER = 0x0400
+
+	const (
+		className  = "SamVNCTrayClass"
+		windowName = ""
+	)
+
+	t.wmSystrayMessage = WM_USER + 1
+	t.visibleItems = make(map[uint32][]uint32)
+	t.menus = make(map[uint32]windows.Handle)
+	t.menuOf = make(map[uint32]windows.Handle)
+	t.menuItemIcons = make(map[uint32]windows.Handle)
+
+	taskbarEventNamePtr, _ := windows.UTF16PtrFromString("TaskbarCreated")
+	res, _, _ := pRegisterWindowMessage.Call(
+		uintptr(unsafe.Pointer(taskbarEventNamePtr)),
+	)
+	t.wmTaskbarCreated = uint32(res)
+	trayLog("[tray] wmTaskbarCreated=%d wmSystrayMessage=%d\n", t.wmTaskbarCreated, t.wmSystrayMessage)
+
+	t.loadedImages = make(map[string]windows.Handle)
+
+	instanceHandle, _, _ := pGetModuleHandle.Call(0)
+	if instanceHandle == 0 {
+		return fmt.Errorf("GetModuleHandleW failed")
+	}
+	t.instance = windows.Handle(instanceHandle)
+
+	iconHandle, _, _ := pLoadIcon.Call(0, uintptr(IDI_APPLICATION))
+	if iconHandle == 0 {
+		return fmt.Errorf("LoadIconW failed")
+	}
+	t.icon = windows.Handle(iconHandle)
+
+	cursorHandle, _, _ := pLoadCursor.Call(0, uintptr(IDC_ARROW))
+	if cursorHandle == 0 {
+		return fmt.Errorf("LoadCursorW failed")
+	}
+	t.cursor = windows.Handle(cursorHandle)
+
+	classNamePtr, _ := windows.UTF16PtrFromString(className)
+	windowNamePtr, _ := windows.UTF16PtrFromString(windowName)
+
+	t.wcex = &wndClassEx{
+		Style:      CS_HREDRAW | CS_VREDRAW,
+		WndProc:    windows.NewCallback(t.wndProc),
+		Instance:   t.instance,
+		Icon:       t.icon,
+		Cursor:     t.cursor,
+		Background: windows.Handle(6),
+		ClassName:  classNamePtr,
+		IconSm:     t.icon,
+	}
+	if err := t.wcex.register(); err != nil {
+		return fmt.Errorf("RegisterClassExW failed: %v", err)
+	}
+
+	windowHandle, _, _ := pCreateWindowEx.Call(
+		uintptr(0),
+		uintptr(unsafe.Pointer(classNamePtr)),
+		uintptr(unsafe.Pointer(windowNamePtr)),
+		uintptr(WS_OVERLAPPEDWINDOW),
+		uintptr(CW_USEDEFAULT),
+		uintptr(CW_USEDEFAULT),
+		uintptr(CW_USEDEFAULT),
+		uintptr(CW_USEDEFAULT),
+		uintptr(0),
+		uintptr(0),
+		uintptr(t.instance),
+		uintptr(0),
+	)
+	if windowHandle == 0 {
+		return fmt.Errorf("CreateWindowExW failed")
+	}
+	t.window = windows.Handle(windowHandle)
+
+	pShowWindow.Call(uintptr(t.window), uintptr(SW_HIDE))
+	pUpdateWindow.Call(uintptr(t.window))
+
+	// NIM_ADD with ONLY NIF_MESSAGE (like pcguy).
 	t.muNID.Lock()
 	defer t.muNID.Unlock()
-	if t.nid != nil {
-		return t.nid.CallbackMessage
+	t.nid = &notifyIconData{
+		Wnd:             windows.Handle(t.window),
+		ID:              100,
+		Flags:           NIF_MESSAGE,
+		CallbackMessage: t.wmSystrayMessage,
 	}
-	return WM_TRAYICON
+	t.nid.Size = uint32(unsafe.Sizeof(*t.nid))
+
+	if err := t.nid.add(); err != nil {
+		return fmt.Errorf("NIM_ADD failed: %v", err)
+	}
+	trayLog("[tray] NIM_ADD success\n")
+
+	// Set version to 4 (critical for right-click messages).
+	if err := t.nid.setVersion(); err != nil {
+		trayLog("[tray] setVersion failed: %v\n", err)
+	} else {
+		trayLog("[tray] setVersion success\n")
+	}
+
+	return nil
 }
 
-func defWindowProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) uintptr {
-	r, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(msg), wParam, lParam)
-	return r
+// ============================================================
+// createMenu (from pcguy)
+// ============================================================
+
+func (t *winTray) createMenu() error {
+	const MIM_APPLYTOSUBMENUS = 0x80000000
+
+	menuHandle, _, _ := pCreatePopupMenu.Call()
+	if menuHandle == 0 {
+		return fmt.Errorf("CreatePopupMenu failed")
+	}
+	t.menus[0] = windows.Handle(menuHandle)
+
+	mi := struct {
+		Size, Mask, Style, Max uint32
+		Background             windows.Handle
+		ContextHelpID          uint32
+		MenuData               uintptr
+	}{
+		Mask: MIM_APPLYTOSUBMENUS,
+	}
+	mi.Size = uint32(unsafe.Sizeof(mi))
+
+	res, _, _ := pSetMenuInfo.Call(
+		uintptr(t.menus[0]),
+		uintptr(unsafe.Pointer(&mi)),
+	)
+	if res == 0 {
+		return fmt.Errorf("SetMenuInfo failed")
+	}
+	return nil
 }
 
-// Run creates the hidden window, adds the tray icon, and runs the message loop.
+// ============================================================
+// Menu item helpers (from pcguy)
+// ============================================================
+
+func (t *winTray) convertToSubMenu(menuItemId uint32) (windows.Handle, error) {
+	const MIIM_SUBMENU = 0x00000004
+
+	res, _, _ := pCreateMenu.Call()
+	if res == 0 {
+		return 0, fmt.Errorf("CreateMenu failed")
+	}
+	menu := windows.Handle(res)
+
+	mi := menuItemInfo{Mask: MIIM_SUBMENU, SubMenu: menu}
+	mi.Size = uint32(unsafe.Sizeof(mi))
+	t.muMenuOf.RLock()
+	hMenu := t.menuOf[menuItemId]
+	t.muMenuOf.RUnlock()
+	res, _, _ = pSetMenuItemInfo.Call(
+		uintptr(hMenu),
+		uintptr(menuItemId),
+		0,
+		uintptr(unsafe.Pointer(&mi)),
+	)
+	if res == 0 {
+		return 0, fmt.Errorf("SetMenuItemInfo failed")
+	}
+	t.muMenus.Lock()
+	t.menus[menuItemId] = menu
+	t.muMenus.Unlock()
+	return menu, nil
+}
+
+func (t *winTray) addOrUpdateMenuItem(menuItemId uint32, parentId uint32, title string, disabled, checked bool) error {
+	const (
+		MIIM_FTYPE   = 0x00000100
+		MIIM_STRING  = 0x00000040
+		MIIM_SUBMENU = 0x00000004
+		MIIM_ID      = 0x00000002
+		MIIM_STATE   = 0x00000001
+	)
+	const MFT_STRING = 0x00000000
+	const (
+		MFS_CHECKED  = 0x00000008
+		MFS_DISABLED = 0x00000003
+	)
+	titlePtr, _ := windows.UTF16PtrFromString(title)
+
+	mi := menuItemInfo{
+		Mask:     MIIM_FTYPE | MIIM_STRING | MIIM_ID | MIIM_STATE,
+		Type:     MFT_STRING,
+		ID:       uint32(menuItemId),
+		TypeData: titlePtr,
+		Cch:      uint32(len(title)),
+	}
+	mi.Size = uint32(unsafe.Sizeof(mi))
+	if disabled {
+		mi.State |= MFS_DISABLED
+	}
+	if checked {
+		mi.State |= MFS_CHECKED
+	}
+
+	var res uintptr
+	t.muMenus.RLock()
+	menu, exists := t.menus[parentId]
+	t.muMenus.RUnlock()
+	if !exists {
+		var err error
+		menu, err = t.convertToSubMenu(parentId)
+		if err != nil {
+			return err
+		}
+		t.muMenus.Lock()
+		t.menus[parentId] = menu
+		t.muMenus.Unlock()
+	} else if t.getVisibleItemIndex(parentId, menuItemId) != -1 {
+		res, _, _ = pSetMenuItemInfo.Call(
+			uintptr(menu),
+			uintptr(menuItemId),
+			0,
+			uintptr(unsafe.Pointer(&mi)),
+		)
+	}
+
+	if res == 0 {
+		t.muMenus.RLock()
+		submenu, exists := t.menus[menuItemId]
+		t.muMenus.RUnlock()
+		if exists {
+			mi.Mask |= MIIM_SUBMENU
+			mi.SubMenu = submenu
+		}
+		t.addToVisibleItems(parentId, menuItemId)
+		position := t.getVisibleItemIndex(parentId, menuItemId)
+		res, _, _ = pInsertMenuItem.Call(
+			uintptr(menu),
+			uintptr(position),
+			1,
+			uintptr(unsafe.Pointer(&mi)),
+		)
+		if res == 0 {
+			t.delFromVisibleItems(parentId, menuItemId)
+			return fmt.Errorf("InsertMenuItemW failed")
+		}
+		t.muMenuOf.Lock()
+		t.menuOf[menuItemId] = menu
+		t.muMenuOf.Unlock()
+	}
+
+	return nil
+}
+
+func (t *winTray) addSeparatorMenuItem(menuItemId, parentId uint32) error {
+	const (
+		MIIM_FTYPE = 0x00000100
+		MIIM_ID    = 0x00000002
+		MIIM_STATE = 0x00000001
+	)
+	const MFT_SEPARATOR = 0x00000800
+
+	mi := menuItemInfo{
+		Mask: MIIM_FTYPE | MIIM_ID | MIIM_STATE,
+		Type: MFT_SEPARATOR,
+		ID:   uint32(menuItemId),
+	}
+	mi.Size = uint32(unsafe.Sizeof(mi))
+
+	t.addToVisibleItems(parentId, menuItemId)
+	position := t.getVisibleItemIndex(parentId, menuItemId)
+	t.muMenus.RLock()
+	menu := uintptr(t.menus[parentId])
+	t.muMenus.RUnlock()
+	res, _, _ := pInsertMenuItem.Call(
+		menu,
+		uintptr(position),
+		1,
+		uintptr(unsafe.Pointer(&mi)),
+	)
+	if res == 0 {
+		return fmt.Errorf("InsertMenuItemW separator failed")
+	}
+	return nil
+}
+
+func (t *winTray) hideMenuItem(menuItemId, parentId uint32) error {
+	const MF_BYCOMMAND = 0x00000000
+	const ERROR_SUCCESS syscall.Errno = 0
+
+	t.muMenus.RLock()
+	menu := uintptr(t.menus[parentId])
+	t.muMenus.RUnlock()
+	res, _, err := pRemoveMenu.Call(
+		menu,
+		uintptr(menuItemId),
+		MF_BYCOMMAND,
+	)
+	if res == 0 && err.(syscall.Errno) != ERROR_SUCCESS {
+		return err
+	}
+	t.delFromVisibleItems(parentId, menuItemId)
+	return nil
+}
+
+func (t *winTray) delFromVisibleItems(parent, val uint32) {
+	t.muVisibleItems.Lock()
+	defer t.muVisibleItems.Unlock()
+	visibleItems := t.visibleItems[parent]
+	for i, itemval := range visibleItems {
+		if val == itemval {
+			t.visibleItems[parent] = append(visibleItems[:i], visibleItems[i+1:]...)
+			break
+		}
+	}
+}
+
+func (t *winTray) addToVisibleItems(parent, val uint32) {
+	t.muVisibleItems.Lock()
+	defer t.muVisibleItems.Unlock()
+	if visibleItems, exists := t.visibleItems[parent]; !exists {
+		t.visibleItems[parent] = []uint32{val}
+	} else {
+		newvisible := append(visibleItems, val)
+		sort.Slice(newvisible, func(i, j int) bool { return newvisible[i] < newvisible[j] })
+		t.visibleItems[parent] = newvisible
+	}
+}
+
+func (t *winTray) getVisibleItemIndex(parent, val uint32) int {
+	t.muVisibleItems.RLock()
+	defer t.muVisibleItems.RUnlock()
+	for i, itemval := range t.visibleItems[parent] {
+		if val == itemval {
+			return i
+		}
+	}
+	return -1
+}
+
+// ============================================================
+// loadIconFrom (from pcguy)
+// ============================================================
+
+func (t *winTray) loadIconFrom(src string) (windows.Handle, error) {
+	const IMAGE_ICON = 1
+	const LR_LOADFROMFILE = 0x00000010
+	const LR_DEFAULTSIZE = 0x00000040
+
+	t.muLoadedImages.RLock()
+	h, ok := t.loadedImages[src]
+	t.muLoadedImages.RUnlock()
+	if !ok {
+		srcPtr, err := windows.UTF16PtrFromString(src)
+		if err != nil {
+			return 0, err
+		}
+		res, _, err := pLoadImage.Call(
+			0,
+			uintptr(unsafe.Pointer(srcPtr)),
+			IMAGE_ICON,
+			0,
+			0,
+			LR_LOADFROMFILE|LR_DEFAULTSIZE,
+		)
+		if res == 0 {
+			return 0, err
+		}
+		h = windows.Handle(res)
+		t.muLoadedImages.Lock()
+		t.loadedImages[src] = h
+		t.muLoadedImages.Unlock()
+	}
+	return h, nil
+}
+
+// ============================================================
+// showMenu (from pcguy — exact copy)
+// ============================================================
+
+func (t *winTray) showMenu() {
+	const (
+		TPM_RIGHTBUTTON = 0x0002
+		TPM_BOTTOMALIGN = 0x0020
+		TPM_LEFTALIGN   = 0x0000
+	)
+	p := point{}
+	res, _, _ := pGetCursorPos.Call(uintptr(unsafe.Pointer(&p)))
+	if res == 0 {
+		trayLog("[tray] showMenu: GetCursorPos failed\n")
+		return
+	}
+
+	const ASFW_ANY = 0xFFFFFFFF
+	pAllowSetForegroundWindow.Call(uintptr(ASFW_ANY))
+
+	fg, _, _ := pGetForegroundWindow.Call()
+	if fg != 0 {
+		if hung, _, _ := pIsHungAppWindow.Call(fg); hung != 0 {
+			trayLog("[tray] showMenu: foreground window hung, skip fg switch\n")
+		} else if fg != uintptr(t.window) {
+			me, _, _ := pGetCurrentThreadId.Call()
+			fgTid, _, _ := pGetWindowThreadProcessId.Call(fg, 0)
+			if fgTid != 0 && fgTid != me {
+				pAttachThreadInput.Call(me, fgTid, 1)
+				pSetForegroundWindow.Call(uintptr(t.window))
+				pBringWindowToTop.Call(uintptr(t.window))
+				pAttachThreadInput.Call(me, fgTid, 0)
+			} else {
+				pSetForegroundWindow.Call(uintptr(t.window))
+			}
+		}
+	}
+	pPostMessage.Call(uintptr(t.window), 0, 0, 0)
+
+	res, _, _ = pTrackPopupMenu.Call(
+		uintptr(t.menus[0]),
+		uintptr(TPM_RIGHTBUTTON|TPM_BOTTOMALIGN|TPM_LEFTALIGN),
+		uintptr(p.X),
+		uintptr(p.Y),
+		0,
+		uintptr(t.window),
+		0,
+	)
+	trayLog("[tray] showMenu: track res=0x%x at (%d,%d)\n", res, p.X, p.Y)
+
+	pPostMessage.Call(uintptr(t.window), 0, 0, 0)
+}
+
+// ============================================================
+// Run — main entry (mirrors pcguy's registerSystray + nativeLoop)
+// ============================================================
+
 func (t *winTray) Run() error {
 	initTrayLog()
 
-	// Register TaskbarCreated message.
-	taskbarCreatedName, _ := windows.UTF16PtrFromString("TaskbarCreated")
-	res, _, _ := procRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(taskbarCreatedName)))
-	t.wmTaskbarCreated = uint32(res)
-
-	// Get module instance handle.
-	instanceHandle, _, _ := procGetModuleHandleW.Call(0)
-
-	// Load default icon and cursor.
-	iconHandle, _, _ := procLoadIconW.Call(0, uintptr(IDI_APPLICATION))
-	cursorHandle, _, _ := procLoadCursorW.Call(0, uintptr(32512)) // IDC_ARROW
-
-	// Register window class.
-	wproc := syscall.NewCallback(windowProc)
-	classNameUTF16, _ := windows.UTF16PtrFromString("SamVNCTrayClass")
-
-	wc := WNDCLASSEXW{
-		Size:          uint32(unsafe.Sizeof(WNDCLASSEXW{})),
-		Style:         CS_HREDRAW | CS_VREDRAW,
-		LpfnWndProc:   wproc,
-		HInstance:     windows.Handle(instanceHandle),
-		HIcon:         windows.Handle(iconHandle),
-		HCursor:       windows.Handle(cursorHandle),
-		HbrBackground: windows.Handle(6), // COLOR_WINDOW + 1
-		LpszClassName: classNameUTF16,
-		HIconSm:       windows.Handle(iconHandle),
-	}
-	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
-
-	// Create a normal hidden window (NOT message-only — TrackPopupMenu needs foreground).
-	windowName, _ := windows.UTF16PtrFromString("")
-	hwnd, _, callErr := procCreateWindowExW.Call(
-		0,
-		uintptr(unsafe.Pointer(classNameUTF16)),
-		uintptr(unsafe.Pointer(windowName)),
-		uintptr(WS_OVERLAPPEDWINDOW),
-		uintptr(CW_USEDEFAULT), uintptr(CW_USEDEFAULT),
-		uintptr(CW_USEDEFAULT), uintptr(CW_USEDEFAULT),
-		0, 0,
-		uintptr(instanceHandle),
-		0,
-	)
-	if hwnd == 0 {
-		return fmt.Errorf("CreateWindowExW failed: %v", callErr)
-	}
-	t.hwnd = windows.HWND(hwnd)
-
-	// Hide the window.
-	procShowWindow.Call(uintptr(t.hwnd), uintptr(SW_HIDE))
-	procUpdateWindow.Call(uintptr(t.hwnd))
-
-	// Register this tray instance.
-	registryMu.Lock()
-	registry[t.hwnd] = t
-	registryMu.Unlock()
-
-	// Add the tray icon.
-	t.addIcon()
-
-	// Set tooltip if provided.
-	if t.tooltip != "" {
-		t.updateTooltip(t.tooltip)
-	}
-
-	// Start keepalive goroutine: periodically re-set NOTIFYICON_VERSION_4
-	// to prevent version reset after RDP reconnect, DPI change, etc.
+	// Start IPC worker.
+	notifyCh = make(chan func(), 32)
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		for fn := range notifyCh {
+			fn()
+		}
+	}()
+
+	if err := t.initInstance(); err != nil {
+		return fmt.Errorf("initInstance failed: %v", err)
+	}
+
+	if err := t.createMenu(); err != nil {
+		return fmt.Errorf("createMenu failed: %v", err)
+	}
+
+	// Set icon from file.
+	if iconPath := t.findIconFile(); iconPath != "" {
+		if err := t.setIcon(iconPath); err != nil {
+			trayLog("[tray] setIcon err: %v\n", err)
+		} else {
+			trayLog("[tray] icon set from %s\n", iconPath)
+		}
+	}
+
+	// Set tooltip.
+	if t.tooltip != "" {
+		t.setTooltip(t.tooltip)
+	}
+
+	// Build initial menu.
+	t.buildMenu()
+
+	// Keepalive: periodically re-set NOTIFYICON_VERSION_4.
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			t.muNID.Lock()
+			t.muNID.RLock()
 			nid := t.nid
-			t.muNID.Unlock()
+			t.muNID.RUnlock()
 			if nid != nil {
-				t.setVersion()
+				asyncNotify(func() {
+					// NIM_MODIFY re-establishes the Explorer<->window connection
+					// after RDP reconnect / session switch / DPI change.
+					// setVersion alone is not enough (it fails on some systems).
+					nid.modify()
+				})
 			}
 		}
 	}()
 
-	// Message loop.
-	trayLog("[tray] entering message loop\n")
+	// Message loop (identical to pcguy's nativeLoop).
+	trayLog("[tray] entering message loop, window=0x%X\n", uintptr(t.window))
+	m := &struct {
+		WindowHandle windows.Handle
+		Message      uint32
+		Wparam       uintptr
+		Lparam       uintptr
+		Time         uint32
+		Pt           point
+	}{}
 	for {
-		var msg MSG
-		ret, _, _ := procGetMessageW.Call(
-			uintptr(unsafe.Pointer(&msg)),
-			0, 0, 0,
-		)
-		if ret == 0 {
-			trayLog("[tray] WM_QUIT received, exiting message loop\n")
-			break
-		}
-		if ret == 0xFFFFFFFF {
-			err := windows.GetLastError()
-			trayLog("[tray] GetMessageW error: %v\n", err)
+		ret, _, err := pGetMessage.Call(uintptr(unsafe.Pointer(m)), 0, 0, 0)
+		switch int32(ret) {
+		case -1:
+			trayLog("[tray] message loop error: %v\n", err)
 			return err
+		case 0:
+			trayLog("[tray] WM_QUIT received, exiting\n")
+			return nil
+		default:
+			pTranslateMessage.Call(uintptr(unsafe.Pointer(m)))
+			pDispatchMessage.Call(uintptr(unsafe.Pointer(m)))
 		}
-		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
-		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
 	}
-
-	// Cleanup
-	t.removeIcon()
-	registryMu.Lock()
-	delete(registry, t.hwnd)
-	registryMu.Unlock()
-	return nil
 }
 
-func (t *winTray) addIcon() {
-	if t.iconAdded {
-		return
-	}
+// ============================================================
+// SamVNC-specific helpers
+// ============================================================
 
-	hIcon := t.loadIconFromFile()
-	if hIcon == 0 {
-		hIcon = t.createFallbackIcon()
-	}
-
-	tipText := "SamVNC"
-	if t.tooltip != "" {
-		tipText = t.tooltip
-	}
-	tipUTF16, _ := windows.UTF16FromString(tipText)
-
-	nid := &NOTIFYICONDATAW{
-		CbSize:          uint32(unsafe.Sizeof(NOTIFYICONDATAW{})),
-		HWnd:            t.hwnd,
-		UID:             100,
-		Flags:           NIF_MESSAGE | NIF_ICON | NIF_TIP,
-		CallbackMessage: WM_TRAYICON,
-		HIcon:           windows.Handle(hIcon),
-	}
-	copy(nid.Tip[:], tipUTF16)
-
-	t.muNID.Lock()
-	t.nid = nid
-	t.muNID.Unlock()
-
-	r, _, _ := procShellNotifyIcon.Call(NIM_ADD, uintptr(unsafe.Pointer(nid)))
-	if r == 0 {
-		trayLog("[tray] Shell_NotifyIcon(NIM_ADD) failed\n")
-	} else {
-		trayLog("[tray] Shell_NotifyIcon(NIM_ADD) success\n")
-	}
-
-	// CRITICAL: Set version to 4 so Explorer sends proper mouse messages
-	// (WM_CONTEXTMENU for right-click, WM_LBUTTONDBLCLK for double-click).
-	// Without this, right-click menu may never appear!
-	t.setVersion()
-
-	t.iconAdded = true
-}
-
-// setVersion sets the notification icon callback version to 4.
-// This must be called after NIM_ADD and after TaskbarCreated.
-func (t *winTray) setVersion() {
-	t.muNID.Lock()
-	defer t.muNID.Unlock()
-	if t.nid == nil {
-		return
-	}
-	t.nid.TimeoutOrVersion = NOTIFYICON_VERSION_4
-	t.nid.CbSize = uint32(unsafe.Sizeof(*t.nid))
-	r, _, _ := procShellNotifyIcon.Call(NIM_SETVERSION, uintptr(unsafe.Pointer(t.nid)))
-	trayLog("[tray] setVersion: NIM_SETVERSION ret=%d\n", r)
-}
-
-// reAddIcon re-adds the icon after Explorer restart.
-func (t *winTray) reAddIcon() {
-	t.muNID.Lock()
-	nid := t.nid
-	t.muNID.Unlock()
-	if nid == nil {
-		return
-	}
-	procShellNotifyIcon.Call(NIM_ADD, uintptr(unsafe.Pointer(nid)))
-	t.setVersion()
-}
-
-func (t *winTray) removeIcon() {
-	if !t.iconAdded {
-		return
-	}
-	t.muNID.Lock()
-	nid := t.nid
-	t.muNID.Unlock()
-	if nid != nil {
-		procShellNotifyIcon.Call(NIM_DELETE, uintptr(unsafe.Pointer(nid)))
-	}
-	t.iconAdded = false
-}
-
-func (t *winTray) updateTooltip(text string) {
-	t.muNID.Lock()
-	defer t.muNID.Unlock()
-	if t.nid == nil {
-		return
-	}
-	t.nid.Flags = NIF_TIP
-	t.nid.CbSize = uint32(unsafe.Sizeof(*t.nid))
-	tipUTF16, _ := windows.UTF16FromString(text)
-	copy(t.nid.Tip[:], tipUTF16)
-	procShellNotifyIcon.Call(NIM_MODIFY, uintptr(unsafe.Pointer(t.nid)))
-}
-
-// loadIconFromFile tries to load tray_icon.ico from several candidate locations.
-func (t *winTray) loadIconFromFile() uintptr {
+// findIconFile locates tray_icon.ico.
+func (t *winTray) findIconFile() string {
 	candidates := []string{}
-
 	if exePath, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exePath)
 		candidates = append(candidates,
@@ -499,180 +961,64 @@ func (t *winTray) loadIconFromFile() uintptr {
 			filepath.Join(exeDir, "assets", "tray_icon.ico"),
 		)
 	}
-
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates, filepath.Join(home, ".samvnc", "tray_icon.ico"))
 	}
-
 	for _, path := range candidates {
-		if _, err := os.Stat(path); err != nil {
-			continue
-		}
-		pathUTF16, err := windows.UTF16PtrFromString(path)
-		if err != nil {
-			continue
-		}
-		hIcon, _, _ := procLoadImageW.Call(
-			0,
-			uintptr(unsafe.Pointer(pathUTF16)),
-			uintptr(IMAGE_ICON),
-			0, 0,
-			uintptr(LR_LOADFROMFILE),
-		)
-		if hIcon != 0 {
-			trayLog("[tray] Loaded icon from %s\n", path)
-			return hIcon
+		if _, err := os.Stat(path); err == nil {
+			return path
 		}
 	}
-	return 0
+	return ""
 }
 
-// createFallbackIcon creates a simple 32x32 icon programmatically.
-func (t *winTray) createFallbackIcon() uintptr {
-	const w, h = 32, 32
+// buildMenu rebuilds the popup menu from t.menuItems.
+func (t *winTray) buildMenu() {
+	// Clear existing menu items.
+	t.muVisibleItems.Lock()
+	t.visibleItems = make(map[uint32][]uint32)
+	t.muVisibleItems.Unlock()
 
-	modGdi := windows.NewLazySystemDLL("gdi32.dll")
-	procCreateBitmap := modGdi.NewProc("CreateBitmap")
-	procDeleteObject := modGdi.NewProc("DeleteObject")
-
-	pixels := make([]uint32, w*h)
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			if x == 0 || x == w-1 || y == 0 || y == h-1 {
-				pixels[y*w+x] = 0x00FFFFFF
-			} else {
-				pixels[y*w+x] = 0x00FF6600
-			}
-		}
+	// Destroy old menu and create new.
+	if old := t.menus[0]; old != 0 {
+		pRemoveMenu.Call(uintptr(old), 0, 0) // not ideal but works
 	}
-
-	hColorBitmap, _, _ := procCreateBitmap.Call(
-		uintptr(w), uintptr(h), 1, 32,
-		uintptr(unsafe.Pointer(&pixels[0])),
-	)
-
-	maskPixels := make([]byte, (w*h)/8)
-	hMaskBitmap, _, _ := procCreateBitmap.Call(
-		uintptr(w), uintptr(h), 1, 1,
-		uintptr(unsafe.Pointer(&maskPixels[0])),
-	)
-
-	ii := ICONINFO{
-		FIcon:    1,
-		HbmMask:  windows.Handle(hMaskBitmap),
-		HbmColor: windows.Handle(hColorBitmap),
-	}
-
-	hIcon, _, _ := procCreateIconIndirect.Call(uintptr(unsafe.Pointer(&ii)))
-	procDeleteObject.Call(hColorBitmap)
-	procDeleteObject.Call(hMaskBitmap)
-
-	return hIcon
-}
-
-// ICONINFO for CreateIconIndirect.
-type ICONINFO struct {
-	FIcon    uint32
-	XHotspot uint32
-	YHotspot uint32
-	HbmMask  windows.Handle
-	HbmColor windows.Handle
-}
-
-// showMenu shows the popup menu at the cursor position.
-// This closely follows pcguy's implementation to ensure the menu
-// actually appears (foreground window handling is critical).
-func (t *winTray) showMenu() {
-	if len(t.menuItems) == 0 {
+	menuHandle, _, _ := pCreatePopupMenu.Call()
+	if menuHandle == 0 {
 		return
 	}
-
-	menu, _, _ := procCreatePopupMenu.Call()
-	if menu == 0 {
-		return
-	}
-	defer procDestroyMenu.Call(menu)
+	t.menus[0] = windows.Handle(menuHandle)
 
 	t.menuIDMap = map[uint32]string{}
+	menuID := uint32(2000)
 
 	for _, item := range t.menuItems {
 		if item.Separator {
-			procAppendMenuW.Call(menu, MF_SEPARATOR, 0, 0)
+			t.addSeparatorMenuItem(menuID, 0)
+			menuID++
 			continue
 		}
-		flags := MF_STRING
-		if item.Disabled {
-			flags |= MF_GRAYED
-		}
-		if item.Checked {
-			flags |= MF_CHECKED
-		}
-
-		labelPtr, _ := windows.UTF16PtrFromString(item.Label)
-		cmdID := t.nextMenuID
-		t.nextMenuID++
-		t.menuIDMap[cmdID] = item.ID
-
-		procAppendMenuW.Call(menu, uintptr(flags), uintptr(cmdID), uintptr(unsafe.Pointer(labelPtr)))
+		t.addOrUpdateMenuItem(menuID, 0, item.Label, item.Disabled, item.Checked)
+		t.menuIDMap[menuID] = item.ID
+		menuID++
 	}
-
-	// Get cursor position.
-	type point struct{ X, Y int32 }
-	var p point
-	procGetCursorPos.Call(uintptr(unsafe.Pointer(&p)))
-
-	trayLog("[tray] showMenu at cursor (%d,%d), %d items\n", p.X, p.Y, len(t.menuItems))
-
-	// === Critical foreground window handling (from pcguy) ===
-	// TrackPopupMenu requires the window to be in the foreground,
-	// otherwise the menu appears and immediately disappears.
-	const ASFW_ANY = 0xFFFFFFFF
-	procAllowSetForegroundWindow.Call(uintptr(ASFW_ANY))
-
-	fg, _, _ := procGetForegroundWindow.Call()
-	if fg != 0 {
-		if hung, _, _ := procIsHungAppWindow.Call(fg); hung != 0 {
-			trayLog("[tray] showMenu: foreground window hung, skip fg switch\n")
-		} else if fg != uintptr(t.hwnd) {
-			me, _, _ := procGetCurrentThreadId.Call()
-			fgTid, _, _ := procGetWindowThreadProcessId.Call(fg, 0)
-			if fgTid != 0 && fgTid != me {
-				procAttachThreadInput.Call(me, fgTid, 1)
-				procSetForegroundWindow.Call(uintptr(t.hwnd))
-				procBringWindowToTop.Call(uintptr(t.hwnd))
-				procAttachThreadInput.Call(me, fgTid, 0)
-			} else {
-				procSetForegroundWindow.Call(uintptr(t.hwnd))
-			}
-		}
-	}
-
-	// Post WM_NULL before TrackPopupMenu (foreground handshake).
-	procPostMessageW.Call(uintptr(t.hwnd), 0, 0, 0)
-
-	res, _, err := procTrackPopupMenu.Call(
-		menu,
-		uintptr(TPM_RIGHTBUTTON|TPM_LEFTALIGN|TPM_BOTTOMALIGN),
-		uintptr(p.X),
-		uintptr(p.Y),
-		0,
-		uintptr(t.hwnd),
-		0,
-	)
-	trayLog("[tray] TrackPopupMenu: res=0x%x err=%v\n", res, err)
-
-	// Post WM_NULL after TrackPopupMenu.
-	procPostMessageW.Call(uintptr(t.hwnd), 0, 0, 0)
 }
+
+// ============================================================
+// Tray interface implementation
+// ============================================================
 
 func (t *winTray) SetMenu(items []MenuItem) {
 	t.menuItems = items
+	if t.window != 0 {
+		t.buildMenu()
+	}
 }
 
 func (t *winTray) SetTooltip(text string) {
 	t.tooltip = text
-	if t.hwnd != 0 {
-		t.updateTooltip(text)
+	if t.nid != nil {
+		t.setTooltip(text)
 	}
 }
 
@@ -681,8 +1027,9 @@ func (t *winTray) SetCallback(cb func(string)) {
 }
 
 func (t *winTray) Stop() {
-	if t.hwnd != 0 {
-		procPostMessageW.Call(uintptr(t.hwnd), WM_CLOSE, 0, 0)
+	if t.window != 0 {
+		const WM_CLOSE = 0x0010
+		pPostMessage.Call(uintptr(t.window), WM_CLOSE, 0, 0)
 	}
 }
 
