@@ -158,6 +158,17 @@ func sendMouse(flags uint32, data uint32) {
 func (i *sendInputInjector) Key(ev protocol.KeyEvent) error {
 	vk := domToVK(ev.Code, ev.Key)
 	if vk == 0 {
+		// Can't map to a VK code. If the key is a single non-ASCII rune
+		// (e.g. CJK punctuation from an IME), fall back to Unicode input.
+		if !ev.Down {
+			return nil // only send on keydown
+		}
+		if len(ev.Key) > 0 {
+			rs := []rune(ev.Key)
+			if len(rs) == 1 && rs[0] > 127 {
+				return i.Type(ev.Key)
+			}
+		}
 		return nil
 	}
 	flags := uint32(keyDown)
@@ -257,6 +268,31 @@ func domToVK(code, key string) uint16 {
 		return vkF1 + 10
 	case "F12":
 		return vkF1 + 11
+	// OEM keys — DOM code names map to Windows OEM VK codes.
+	// These MUST be handled by code name, NOT by the ASCII value of key,
+	// because e.g. ',' (0x2C) ≠ VK_OEM_COMMA (0xBC); 0x2C is VK_SNAPSHOT!
+	case "Comma":
+		return 0xBC // VK_OEM_COMMA
+	case "Period":
+		return 0xBE // VK_OEM_PERIOD
+	case "Slash":
+		return 0xBF // VK_OEM_2  (/ and ?)
+	case "Semicolon":
+		return 0xBA // VK_OEM_1  (; and :)
+	case "Quote":
+		return 0xDE // VK_OEM_7  (' and ")
+	case "BracketLeft":
+		return 0xDB // VK_OEM_4  ([ and {)
+	case "BracketRight":
+		return 0xDD // VK_OEM_6  (] and })
+	case "Backslash":
+		return 0xDC // VK_OEM_5  (\ and |)
+	case "Backquote":
+		return 0xC0 // VK_OEM_3  (` and ~)
+	case "Minus":
+		return 0xBD // VK_OEM_MINUS (- and _)
+	case "Equal":
+		return 0xBB // VK_OEM_PLUS  (= and +)
 	}
 	if len(code) >= 4 {
 		if c := code[:3]; c == "Key" {
@@ -272,8 +308,14 @@ func domToVK(code, key string) uint16 {
 			}
 		}
 	}
+	// Fallback: for single-char keys that are letters (A-Z) or digits (0-9),
+	// the ASCII value IS the VK code. For any other single-char key (punctuation),
+	// we cannot safely map it — return 0 so the caller can try Unicode input.
 	if len(key) == 1 {
-		return uint16(toupper(key[0]))
+		c := key[0]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			return uint16(toupper(c))
+		}
 	}
 	return 0
 }
