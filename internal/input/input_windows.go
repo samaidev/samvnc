@@ -78,21 +78,19 @@ const (
 )
 
 type mouseInput struct {
-	Type uint32
-	Dx   int32
-	Dy   int32
+	Dx        int32
+	Dy        int32
 	MouseData uint32
-	DwFlags uint32
-	Time uint32
-	DwExtra uintptr
+	DwFlags   uint32
+	Time      uint32
+	DwExtra   uintptr
 }
 
 type keybdInput struct {
-	Type uint32
-	WVk uint16
-	WScan uint16
+	WVk     uint16
+	WScan   uint16
 	DwFlags uint32
-	Time uint32
+	Time    uint32
 	DwExtra uintptr
 }
 
@@ -150,7 +148,7 @@ func (i *sendInputInjector) Mouse(ev protocol.MouseEvent) error {
 }
 
 func sendMouse(flags uint32, data uint32) {
-	mi := mouseInput{Type: inputMouse, MouseData: data, DwFlags: flags}
+	mi := mouseInput{MouseData: data, DwFlags: flags}
 	var raw [32]byte
 	*(*mouseInput)(unsafe.Pointer(&raw[0])) = mi
 	in := input{Type: inputMouse, Mi: raw}
@@ -166,7 +164,7 @@ func (i *sendInputInjector) Key(ev protocol.KeyEvent) error {
 	if !ev.Down {
 		flags = keyUp
 	}
-	ki := keybdInput{Type: inputKeyboard, WVk: uint16(vk), DwFlags: flags}
+	ki := keybdInput{WVk: uint16(vk), DwFlags: flags}
 	var raw [32]byte
 	*(*keybdInput)(unsafe.Pointer(&raw[0])) = ki
 	in := input{Type: inputKeyboard, Mi: raw}
@@ -183,7 +181,7 @@ func (i *sendInputInjector) Type(text string) error {
 	for _, r := range text {
 		sc := uint16(r)
 		for _, flags := range []uint32{keyDown | keyUnicode, keyUp | keyUnicode} {
-			ki := keybdInput{Type: inputKeyboard, WScan: sc, DwFlags: flags}
+			ki := keybdInput{WScan: sc, DwFlags: flags}
 			var raw [32]byte
 			*(*keybdInput)(unsafe.Pointer(&raw[0])) = ki
 			in := input{Type: inputKeyboard, Mi: raw}

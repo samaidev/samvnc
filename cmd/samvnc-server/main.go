@@ -260,7 +260,7 @@ func startTunnel(cfg config.Config, port int, srv *server.Server, agentToken str
                         log.Printf("[aitun] "+format, args...)
                 },
         }
-        t, err := tunnel.Start(tcfg, 30*time.Second)
+        t, err := tunnel.Start(tcfg, 90*time.Second)
         if err != nil {
                 log.Printf("tunnel: %v (continuing without public URL; use --tunnel off or install aitun)", err)
                 return

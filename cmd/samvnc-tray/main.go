@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -31,6 +32,19 @@ import (
 	"github.com/samaidev/samvnc/internal/settings"
 	"github.com/samaidev/samvnc/internal/tray"
 )
+
+// killStaleProcesses kills any leftover samvnc-server / aitun-client
+// processes from a previous run, so the new tunnel connection is not
+// rejected with "Tunnel occupied by another client".
+func killStaleProcesses() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	_ = exec.Command("taskkill", "/F", "/IM",
+		"aitun-client-windows-amd6.exe").Run()
+	_ = exec.Command("taskkill", "/F", "/IM",
+		"samvnc-server.exe").Run()
+}
 
 // Tray state constants.
 const (
@@ -53,6 +67,24 @@ type TrayApp struct {
 }
 
 func main() {
+	// Kill stale processes from a previous run (prevents "Tunnel occupied").
+	killStaleProcesses()
+
+	// Redirect log output to ~/.samvnc/tray.log as well.
+	if home, err := os.UserHomeDir(); err == nil {
+		logPath := filepath.Join(home, ".samvnc", "tray.log")
+		_ = os.MkdirAll(filepath.Dir(logPath), 0755)
+		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+			log.SetOutput(f)
+		}
+	}
+
+	log.Printf("=== Tray log started ===")
+
+	// Install a handler that swallows CTRL_CLOSE_EVENT so the tray
+	// survives when the parent shell exits.
+	ignoreConsoleClose()
+
 	// Load settings.
 	s, err := settings.Load()
 	if err != nil {
@@ -126,11 +158,13 @@ func (a *TrayApp) startServer() {
 	a.state = stateStarting
 	a.mu.Unlock()
 
+	log.Printf("[tray] startServer called")
 	a.refreshMenu()
 	a.tray.SetTooltip("SamVNC — Starting…")
 
 	// Find the samvnc-server binary.
 	serverPath := findServerBinary()
+	log.Printf("[tray] serverPath=%q", serverPath)
 	if serverPath == "" {
 		a.mu.Lock()
 		a.state = stateStopped
@@ -145,8 +179,17 @@ func (a *TrayApp) startServer() {
 		"-token", a.settings.AuthToken,
 		"-verbose",
 	}
-	if a.settings.AgentToken != "" {
-		args = append(args, "-aitun-agent-token", a.settings.AgentToken)
+	// The key can be either an agent token (aitagt_...) or a tunnel token (ait_...).
+	// Agent tokens auto-register a subdomain; tunnel tokens connect directly.
+	key := a.settings.AgentToken
+	if key != "" {
+		if strings.HasPrefix(key, "ait_") {
+			// Tunnel token — use directly.
+			args = append(args, "-aitun-token", key)
+		} else {
+			// Agent token — for auto subdomain registration.
+			args = append(args, "-aitun-agent-token", key)
+		}
 	}
 	if a.settings.Subdomain != "" {
 		args = append(args, "-aitun-subdomain", a.settings.Subdomain)
@@ -164,9 +207,15 @@ func (a *TrayApp) startServer() {
 		a.refreshMenu()
 		return
 	}
-	cmd.Stderr = nil
+	// Capture stderr too — server logs go to stderr.
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		stderr = nil
+	}
 
+	log.Printf("[tray] starting server: %s %v", serverPath, args)
 	if err := cmd.Start(); err != nil {
+		log.Printf("[tray] cmd.Start error: %v", err)
 		a.mu.Lock()
 		a.state = stateStopped
 		a.mu.Unlock()
@@ -174,6 +223,7 @@ func (a *TrayApp) startServer() {
 		a.tray.SetTooltip("SamVNC — Error (could not start)")
 		return
 	}
+	log.Printf("[tray] server started, PID=%d", cmd.Process.Pid)
 
 	a.mu.Lock()
 	a.cmd = cmd
@@ -186,14 +236,16 @@ func (a *TrayApp) startServer() {
 
 	// Pump stdout to find the public URL.
 	urlRE := regexp.MustCompile(`https?://[^\s]+`)
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 4096), 1<<20)
-	go func() {
+	scanLines := func(r interface{ Read([]byte) (int, error) }) {
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 0, 4096), 1<<20)
 		for scanner.Scan() {
 			line := scanner.Text()
 			log.Printf("[server] %s", line)
-			// Look for the public URL line.
-			if strings.Contains(strings.ToLower(line), "public url") ||
+			// Look for the public URL line (case-insensitive).
+			lower := strings.ToLower(line)
+			if strings.Contains(lower, "public url") ||
+				strings.Contains(lower, "tunnel: public url") ||
 				strings.Contains(line, "aitun.cc") {
 				if u := urlRE.FindString(line); u != "" {
 					a.mu.Lock()
@@ -204,7 +256,11 @@ func (a *TrayApp) startServer() {
 				}
 			}
 		}
-	}()
+	}
+	go scanLines(stdout)
+	if stderr != nil {
+		go scanLines(stderr)
+	}
 
 	// Wait for the process to exit.
 	go func() {
@@ -229,11 +285,25 @@ func (a *TrayApp) stopServer() {
 	a.mu.Unlock()
 
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		// Kill the entire process tree (server + aitun-client child).
+		killProcessTree(cmd.Process)
 		_ = cmd.Wait()
 	}
 	a.refreshMenu()
 	a.tray.SetTooltip("SamVNC — Stopped")
+}
+
+// killProcessTree kills a process and all its children.
+func killProcessTree(proc *os.Process) {
+	if proc == nil {
+		return
+	}
+	// On Windows, use taskkill /T /F to kill the process tree.
+	if runtime.GOOS == "windows" {
+		_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(proc.Pid)).Run()
+	} else {
+		_ = proc.Kill()
+	}
 }
 
 // toggleAutoStart enables or disables boot-time auto-start.
@@ -256,50 +326,49 @@ func (a *TrayApp) toggleAutoStart(enable bool) {
 	a.refreshMenu()
 }
 
-// openSettings opens the settings file in the default text editor.
+// openSettings opens a native GUI settings dialog.
 func (a *TrayApp) openSettings() {
-	path := settings.DefaultPath()
+	a.mu.Lock()
+	current := &settings.Settings{
+		AgentToken: a.settings.AgentToken,
+		Subdomain:  a.settings.Subdomain,
+		AuthToken:  a.settings.AuthToken,
+		AutoStart:  a.settings.AutoStart,
+	}
+	publicURL := a.publicURL
+	authToken := a.settings.AuthToken
+	a.mu.Unlock()
 
-	// Ensure the file exists.
-	if _, err := os.Stat(path); err != nil {
-		_ = settings.Save(a.settings)
+	// Open the dialog (blocks until user closes it).
+	newSettings, copyAddr, ok := openSettingsDialog(current, publicURL, authToken)
+	if !ok {
+		// Even if user cancelled, they may have clicked Copy Address.
+		return
 	}
 
-	// Open with the default editor.
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("notepad.exe", path)
-	case "darwin":
-		cmd = exec.Command("open", "-e", path)
-	default:
-		cmd = exec.Command("xdg-open", path)
+	// Preserve auth token if user cleared it.
+	if newSettings.AuthToken == "" {
+		newSettings.AuthToken = current.AuthToken
 	}
-	_ = cmd.Start()
 
-	// Wait for the editor to close, then reload settings.
-	go func() {
-		_ = cmd.Wait()
-		newSettings, err := settings.Load()
-		if err != nil {
-			log.Printf("reload settings: %v", err)
-			return
-		}
-		// Preserve the auth token (don't overwrite it from the file if empty).
-		if newSettings.AuthToken == "" {
-			newSettings.AuthToken = a.settings.AuthToken
-		}
-		a.mu.Lock()
-		a.settings = newSettings
-		a.mu.Unlock()
-		a.refreshMenu()
+	// Save and apply.
+	a.mu.Lock()
+	a.settings = newSettings
+	a.mu.Unlock()
 
-		// If server is running, restart it to apply new settings.
-		if a.state == stateRunning {
-			a.stopServer()
-			go a.startServer()
-		}
-	}()
+	if err := settings.Save(newSettings); err != nil {
+		log.Printf("save settings: %v", err)
+	}
+
+	a.refreshMenu()
+
+	// If server is running, restart it to apply new settings.
+	if a.state == stateRunning {
+		a.stopServer()
+		go a.startServer()
+	}
+
+	_ = copyAddr // copy already done inside dialog
 }
 
 // copyAddress copies the public URL with auth token to the clipboard.
