@@ -169,7 +169,11 @@ func startTunnel(cfg config.Config, port int, srv *server.Server, agentToken str
         // (aitagt_...) or the built-in default, auto-register a subdomain via
         // the aitun.cc management API. This gives samvnc a "just run" experience
         // similar to samcommand.
-        if tunnelToken == "" {
+        //
+        // When both tunnelToken and agentToken are empty, skip subdomain
+        // registration entirely and start an anonymous ephemeral tunnel
+        // (proxy address mode). The user gets a random https://xxx.t.aitun.cc URL.
+        if tunnelToken == "" && agentToken != "" {
                 // Resolve the subdomain name with the same precedence as samcommand:
                 //   a. Explicit --aitun-subdomain / SAMVNC_AITUN_SUBDOMAIN
                 //   b. Persisted subdomain from a previous successful run (stable URL)

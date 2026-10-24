@@ -904,7 +904,7 @@ func (t *winTray) Run() error {
 
 	// Keepalive: periodically re-set NOTIFYICON_VERSION_4.
 	go func() {
-		ticker := time.NewTicker(15 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
 			t.muNID.RLock()
@@ -915,7 +915,8 @@ func (t *winTray) Run() error {
 					// NIM_MODIFY re-establishes the Explorer<->window connection
 					// after RDP reconnect / session switch / DPI change.
 					// setVersion alone is not enough (it fails on some systems).
-					nid.modify()
+					err := nid.modify()
+					trayLog("[tray] keepalive: modify err=%v\n", err)
 				})
 			}
 		}
