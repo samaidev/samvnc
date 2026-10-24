@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -252,8 +253,9 @@ type winTray struct {
 	menuItems  []MenuItem
 	callback   func(string)
 	tooltip    string
-	menuIDMap  map[uint32]string
-	nextMenuID uint32
+	menuIDMap    map[uint32]string
+	nextMenuID   uint32
+	lastMsgTime  int64 // unix nano of last tray message received
 }
 
 func newTray() Tray {
@@ -375,6 +377,7 @@ func (t *winTray) wndProc(hWnd windows.Handle, message uint32, wParam, lParam ui
 	case t.wmSystrayMessage:
 		trayMsg := lParam & 0xFFFF
 		trayLog("[tray] tray msg=0x%04X\n", trayMsg)
+		atomic.StoreInt64(&t.lastMsgTime, time.Now().UnixNano())
 		switch trayMsg {
 		case WM_LBUTTONDBLCLK:
 			// Double-click: could trigger default action
@@ -906,19 +909,39 @@ func (t *winTray) Run() error {
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
+		noMsgCount := 0
 		for range ticker.C {
 			t.muNID.RLock()
 			nid := t.nid
 			t.muNID.RUnlock()
-			if nid != nil {
-				asyncNotify(func() {
-					// NIM_MODIFY re-establishes the Explorer<->window connection
-					// after RDP reconnect / session switch / DPI change.
-					// setVersion alone is not enough (it fails on some systems).
+			if nid == nil {
+				continue
+			}
+			// Check if we've received any tray messages recently.
+			lastMsg := atomic.LoadInt64(&t.lastMsgTime)
+			now := time.Now().UnixNano()
+			if lastMsg > 0 && (now-lastMsg) > int64(30*time.Second) {
+				noMsgCount++
+			} else {
+				noMsgCount = 0
+			}
+
+			asyncNotify(func() {
+				if noMsgCount >= 3 {
+					// No tray messages for 30+ seconds — Explorer likely lost
+					// the icon association. Force re-add: DELETE then ADD.
+					trayLog("[tray] keepalive: no messages for %d0s, re-adding icon\n", noMsgCount)
+					nid.delete()
+					nid.add()
+					nid.setVersion()
+					// Reset the timer so we don't immediately re-add again.
+					atomic.StoreInt64(&t.lastMsgTime, time.Now().UnixNano())
+				} else {
+					// Normal keepalive: NIM_MODIFY to maintain connection.
 					err := nid.modify()
 					trayLog("[tray] keepalive: modify err=%v\n", err)
-				})
-			}
+				}
+			})
 		}
 	}()
 
