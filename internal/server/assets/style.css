@@ -12,6 +12,8 @@ html, body {
   -webkit-touch-callout: none;
   user-select: none;
   touch-action: none;
+  display: flex;
+  flex-direction: column;
 }
 
 #topbar {
@@ -72,6 +74,8 @@ button:active { background: #1f6feb; border-color: #388bfd; }
   .brand { font-size: 13px; }
   .status { font-size: 11px; }
   #inlineControls { display: none !important; }
+  /* On mobile, clipboardBar is hidden (use mobileBar instead). */
+  #clipboardBar { display: none !important; }
 }
 /* Wide / no-touch: show inline controls, hide menu button. */
 @media (min-width: 721px) and (pointer: fine) {
@@ -99,7 +103,7 @@ button:active { background: #1f6feb; border-color: #388bfd; }
 #stage {
   position: relative;
   flex: 1;
-  height: calc(100% - 42px);
+  min-height: 0; /* allow flex to shrink */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -189,10 +193,7 @@ button:active { background: #1f6feb; border-color: #388bfd; }
 #zoomBadge.hidden { display: none; }
 
 #clipboardBar {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  flex: 0 0 auto; /* don't grow, don't shrink — same layer as stage */
   display: flex;
   align-items: center;
   gap: 8px;
@@ -219,10 +220,7 @@ button:active { background: #1f6feb; border-color: #388bfd; }
 /* ---- Mobile bar ---- */
 #mobileBar {
   display: none;
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  flex: 0 0 auto; /* same layer as stage, not overlay */
   gap: 6px;
   padding: 6px 10px;
   padding-bottom: max(6px, env(safe-area-inset-bottom));
@@ -233,8 +231,7 @@ button:active { background: #1f6feb; border-color: #388bfd; }
 }
 @media (pointer: coarse), (max-width: 720px) {
   #mobileBar { display: flex; }
-  #clipboardBar { display: none !important; }
-  #stage { height: calc(100% - 42px - 52px); }
+  #stage { flex: 1; min-height: 0; }
 }
 #mobileBar button {
   flex: 1;
