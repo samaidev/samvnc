@@ -283,6 +283,22 @@ type winTray struct {
         menuOpen       bool
         pendingRebuild bool
 
+        // Menu-trigger dedup. With NOTIFYICON_VERSION_4 the shell reports a
+        // single physical right-click as BOTH the raw WM_RBUTTONUP and the
+        // synthetic WM_CONTEXTMENU (and a left-click as NIN_SELECT plus
+        // WM_LBUTTONUP). Each of those used to call showMenu(), producing
+        // TWO overlapping TrackPopupMenu modal loops on the same menu.
+        // A single click then ends both loops and EACH posts its own
+        // WM_COMMAND — two commands for one click. Combined with sequential
+        // menu-ID assignment this remapped the second command onto a
+        // DIFFERENT item after a rebuild: clicking Stop killed the server,
+        // the duplicate command landed on the rebuilt menu's "start" slot
+        // and the server instantly restarted ("Stop does not stop").
+        // lastMenuTrigger collapses the duplicate notifications; stable
+        // per-item menu IDs (see stableMenuIDs) make any stray duplicate
+        // command harmless even if it still slips through.
+        lastMenuTrigger time.Time
+
         // SamVNC-specific fields
         muItems      sync.RWMutex
         menuItems    []MenuItem
@@ -439,11 +455,9 @@ func (t *winTray) wndProc(hWnd windows.Handle, message uint32, wParam, lParam ui
                         // Double-click: could trigger default action
                 case WM_LBUTTONUP, NIN_SELECT:
                         // Single left-click: show menu (SamVNC behavior)
-                        trayLog("[tray] left-click -> showMenu\n")
-                        t.showMenu()
+                        t.menuTrigger("left-click")
                 case WM_RBUTTONUP, WM_CONTEXTMENU:
-                        trayLog("[tray] right-click -> showMenu\n")
-                        t.showMenu()
+                        t.menuTrigger("right-click")
                 }
         case t.wmTaskbarCreated:
                 trayLog("[tray] TaskbarCreated -> re-add icon\n")
@@ -883,6 +897,14 @@ func (t *winTray) showMenu() {
                 TPM_BOTTOMALIGN = 0x0020
                 TPM_LEFTALIGN   = 0x0000
         )
+        // Re-entrancy guard FIRST: TrackPopupMenu's modal loop dispatches
+        // tray messages, so showMenu can be re-entered while a menu is
+        // already tracking. A second nested TrackPopupMenu on the same menu
+        // handle yields one WM_COMMAND per tracking loop for a single click.
+        if t.menuOpen {
+                trayLog("[tray] showMenu: menu already open, ignore\n")
+                return
+        }
         t.muMenus.RLock()
         menu := t.menus[0]
         t.muMenus.RUnlock()
@@ -902,10 +924,6 @@ func (t *winTray) showMenu() {
         res, _, _ := pGetCursorPos.Call(uintptr(unsafe.Pointer(&p)))
         if res == 0 {
                 trayLog("[tray] showMenu: GetCursorPos failed\n")
-                return
-        }
-        if t.menuOpen {
-                trayLog("[tray] showMenu: menu already open, ignore\n")
                 return
         }
 
@@ -1118,6 +1136,38 @@ func (t *winTray) findIconFile() string {
         return ""
 }
 
+// menuTrigger funnels all menu-opening tray notifications through one
+// dedup gate. See the lastMenuTrigger field comment for why this exists.
+func (t *winTray) menuTrigger(kind string) {
+        const menuDedupWindow = 600 * time.Millisecond
+        now := time.Now()
+        if !t.lastMenuTrigger.IsZero() && now.Sub(t.lastMenuTrigger) < menuDedupWindow {
+                trayLog("[tray] %s -> showMenu SUPPRESSED (duplicate trigger within %v)\n",
+                        kind, menuDedupWindow)
+                return
+        }
+        t.lastMenuTrigger = now
+        trayLog("[tray] %s -> showMenu\n", kind)
+        t.showMenu()
+}
+
+// stableMenuIDs assign FIXED Win32 menu-item identifiers to well-known
+// item IDs. Sequential IDs (2000, 2001, ...) shift meaning whenever the
+// menu is rebuilt with a different first item (Start <-> Stop swap on
+// every state change). A WM_COMMAND that arrives after a rebuild would
+// then be interpreted as a DIFFERENT action — the "Stop restarts the
+// server" bug. Fixed IDs make a stale command resolve to the SAME action:
+// a duplicate "stop" is a harmless no-op instead of a "start".
+var stableMenuIDs = map[string]uint32{
+        "start":        2101,
+        "stop":         2102,
+        "autostart_on": 2103,
+        "autostart_off": 2104,
+        "settings":     2105,
+        "copy_address": 2106,
+        "exit":         2107,
+}
+
 // buildMenu rebuilds the popup menu from t.menuItems.
 //
 // Thread-safety: this runs on the window thread (invoked either directly
@@ -1156,19 +1206,27 @@ func (t *winTray) buildMenu() {
         t.muMenuOf.Lock()
         t.menuIDMap = map[uint32]string{}
         t.muMenuOf.Unlock()
-        menuID := uint32(2000)
+        // Separator IDs are indexed (max 3 separators in our menus);
+        // unknown item IDs fall back to a non-colliding dynamic range.
+        sepIndex := 0
+        nextID := uint32(2200)
 
         for _, item := range items {
                 if item.Separator {
-                        t.addSeparatorMenuItem(menuID, 0)
-                        menuID++
+                        sepID := uint32(2090 + sepIndex)
+                        sepIndex++
+                        t.addSeparatorMenuItem(sepID, 0)
                         continue
+                }
+                menuID, ok := stableMenuIDs[item.ID]
+                if !ok {
+                        menuID = nextID
+                        nextID++
                 }
                 t.addOrUpdateMenuItem(menuID, 0, item.Label, item.Disabled, item.Checked)
                 t.muMenuOf.Lock()
                 t.menuIDMap[menuID] = item.ID
                 t.muMenuOf.Unlock()
-                menuID++
         }
 }
 

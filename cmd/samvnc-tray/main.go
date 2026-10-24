@@ -82,6 +82,14 @@ type TrayApp struct {
         tray     tray.Tray
         state    string
 
+        // settingsDialogOpen guards against re-entrant settings dialogs.
+        // The dialog runs its own message pump that also dispatches tray
+        // messages, so the user can open the tray menu WHILE the dialog is
+        // up; without the guard a second "Settings..." click would create a
+        // nested dialog whose global dialogResult/dialogDone clobber the
+        // outer one (mysteriously restored/corrupted values).
+        settingsDialogOpen bool
+
         // Subprocess management.
         cmd      *exec.Cmd
         publicURL string // e.g. https://samvnc-host-abc.t.aitun.cc
@@ -151,23 +159,31 @@ func main() {
 }
 
 // onMenuItem is called when a tray menu item is clicked.
+//
+// NOTE: this runs on the tray window thread (from the WM_COMMAND handler).
+// Anything that can block (taskkill, cmd.Wait) MUST run in a goroutine —
+// blocking here freezes the menu and all further tray interaction.
 func (a *TrayApp) onMenuItem(itemID string) {
         switch itemID {
         case "start":
                 go a.startServer()
         case "stop":
-                a.stopServer()
+                // stopServer shells out to taskkill and waits for the
+                // process to die — never do that on the UI thread.
+                go a.stopServer()
         case "autostart_on":
                 a.toggleAutoStart(true)
         case "autostart_off":
                 a.toggleAutoStart(false)
         case "settings":
-                a.openSettings()
+                go a.openSettings()
         case "copy_address":
                 a.copyAddress()
         case "exit":
-                a.stopServer()
-                a.tray.Stop()
+                go func() {
+                        a.stopServer()
+                        a.tray.Stop()
+                }()
         }
 }
 
@@ -299,6 +315,10 @@ func (a *TrayApp) startServer() {
 }
 
 // stopServer stops the samvnc-server subprocess.
+//
+// Idempotent: duplicate "stop" commands (the tray shell can deliver two
+// WM_COMMANDs for one click) resolve to a harmless no-op instead of
+// killing a freshly restarted server.
 func (a *TrayApp) stopServer() {
         a.mu.Lock()
         cmd := a.cmd
@@ -308,9 +328,11 @@ func (a *TrayApp) stopServer() {
         a.mu.Unlock()
 
         if cmd != nil && cmd.Process != nil {
+                log.Printf("[tray] stopping server PID=%d", cmd.Process.Pid)
                 // Kill the entire process tree (server + aitun-client child).
                 killProcessTree(cmd.Process)
                 _ = cmd.Wait()
+                log.Printf("[tray] server stopped")
         }
         a.refreshMenu()
         a.tray.SetTooltip("SamVNC — Stopped")
@@ -351,7 +373,16 @@ func (a *TrayApp) toggleAutoStart(enable bool) {
 
 // openSettings opens a native GUI settings dialog.
 func (a *TrayApp) openSettings() {
+        // Re-entrancy guard: the dialog pumps tray messages, so the tray
+        // menu can be opened again while the dialog is up. A nested dialog
+        // would share/overwrite the global dialogResult state.
         a.mu.Lock()
+        if a.settingsDialogOpen {
+                a.mu.Unlock()
+                log.Printf("[tray] settings dialog already open — ignoring")
+                return
+        }
+        a.settingsDialogOpen = true
         current := &settings.Settings{
                 AgentToken: a.settings.AgentToken,
                 Subdomain:  a.settings.Subdomain,
@@ -360,7 +391,15 @@ func (a *TrayApp) openSettings() {
         }
         publicURL := a.publicURL
         authToken := a.settings.AuthToken
+        oldKey := a.settings.AgentToken
+        wasRunning := a.state == stateRunning || a.state == stateStarting
         a.mu.Unlock()
+
+        defer func() {
+                a.mu.Lock()
+                a.settingsDialogOpen = false
+                a.mu.Unlock()
+        }()
 
         // Open the dialog (blocks until user closes it).
         newSettings, copyAddr, ok := openSettingsDialog(current, publicURL, authToken)
@@ -369,9 +408,16 @@ func (a *TrayApp) openSettings() {
                 return
         }
 
-        // Preserve auth token if user cleared it.
+        // The dialog has no subdomain control anymore — never clobber the
+        // stored value with the dialog's always-empty field.
+        newSettings.Subdomain = current.Subdomain
+
+        // Clearing the access token means "give me a new one": generate a
+        // fresh token so the old shareable URLs stop working. (Silently
+        // keeping the old token made the field impossible to clear.)
         if newSettings.AuthToken == "" {
-                newSettings.AuthToken = current.AuthToken
+                newSettings.AuthToken = settings.GenerateToken()
+                log.Printf("[tray] access token cleared by user — new token generated")
         }
 
         // Save and apply.
@@ -385,8 +431,19 @@ func (a *TrayApp) openSettings() {
 
         a.refreshMenu()
 
+        // If the aitun key changed, kill stale tunnel clients that still
+        // carry the OLD key. Without this, the previous client survives the
+        // restart (startServer only kills clients matching the NEW key and
+        // killStaleProcesses("") is a no-op when the key was cleared) and
+        // the old tunnel/subdomain stays live — the clear appears to have
+        // no effect.
+        if newSettings.AgentToken != oldKey {
+                log.Printf("[tray] aitun key changed — killing stale clients of the old key")
+                killStaleProcesses(oldKey)
+        }
+
         // If server is running, restart it to apply new settings.
-        if a.state == stateRunning {
+        if wasRunning {
                 a.stopServer()
                 go a.startServer()
         }
