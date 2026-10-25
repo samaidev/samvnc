@@ -99,6 +99,21 @@ var msgMap = map[string]i18nPair{
         "dlg.ok":       {"OK", "确定"},
         "dlg.cancel":   {"Cancel", "取消"},
 
+        // Linux zenity dialog extras.
+        "dlg.copyHint": {"Current address — select the text and press Ctrl+C to copy, or click OK to copy automatically:",
+                "当前地址 —— 可选中文字后按 Ctrl+C 复制，点“确定”自动复制："},
+        "dlg.copyFallback": {"Automatic copy failed (no clipboard tool). Select the address below and press Ctrl+C:",
+                "自动复制失败（系统缺少剪贴板工具）。请选中下面的地址后按 Ctrl+C 复制："},
+        "dlg.now":      {"Auto-start on boot:", "开机自动启动："},
+        "dlg.stOn":     {"enabled", "已启用"},
+        "dlg.stOff":    {"disabled", "已停用"},
+        "dlg.okEnable": {"OK = enable, Cancel = disable", "点“确定”= 启用 · 点“取消”= 停用"},
+
+        // Server-only (headless) fallback messages.
+        "msg.serverOnly": {"no GUI/tray environment detected — running in server-only mode (press Ctrl+C to stop).",
+                "未检测到图形界面/托盘环境 —— 已进入无界面服务模式（按 Ctrl+C 停止）。"},
+        "msg.serverOnlyURL": {"SamVNC public URL:", "SamVNC 公网访问地址："},
+
         // Language combo box. These intentionally stay bilingual in both UI
         // languages so the user can always find their language.
         "lang.auto": {"Auto (system)", "自动（跟随系统）"},

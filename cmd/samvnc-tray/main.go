@@ -21,12 +21,15 @@ import (
         "log"
         "os"
         "os/exec"
+        "os/signal"
         "path/filepath"
         "regexp"
         "runtime"
         "strconv"
         "strings"
         "sync"
+        "syscall"
+        "time"
 
         "github.com/samaidev/samvnc/internal/autostart"
         "github.com/samaidev/samvnc/internal/settings"
@@ -162,11 +165,60 @@ func main() {
 
         // Run the tray event loop (blocks until exit).
         if err := t.Run(); err != nil {
-                log.Printf("tray error: %v", err)
+                // No GUI/tray environment (headless Linux over SSH, macOS
+                // launchd without an Aqua session, ...). DO NOT exit here:
+                // the server subprocess is already up and serving, and the
+                // documented one-click start command is `samvnc-tray` — it
+                // must keep working without a desktop. Fall back to a
+                // server-only foreground mode until interrupted.
+                log.Printf("tray unavailable (%v) — running in server-only mode", err)
+                runServerOnly(app)
         }
 
         // Cleanup: stop the server if running.
         app.stopServer()
+}
+
+// runServerOnly keeps the process alive without any GUI when the platform
+// tray backend is unavailable (headless server, SSH session, CI, ...).
+// It prints the public URL (with the access token) to stdout as soon as
+// the tunnel reports it, so the one-click command still tells the user
+// where to connect, and blocks until SIGINT/SIGTERM.
+func runServerOnly(app *TrayApp) {
+        fmt.Println("SamVNC " + tr("msg.serverOnly"))
+
+        // Watch for the public URL so headless users can connect.
+        last := ""
+        stop := make(chan struct{})
+        go func() {
+                ticker := time.NewTicker(2 * time.Second)
+                defer ticker.Stop()
+                for {
+                        select {
+                        case <-stop:
+                                return
+                        case <-ticker.C:
+                                app.mu.Lock()
+                                u := app.publicURL
+                                tok := app.settings.AuthToken
+                                app.mu.Unlock()
+                                if u != "" && u != last {
+                                        last = u
+                                        full := u
+                                        if tok != "" {
+                                                full += "?token=" + tok
+                                        }
+                                        fmt.Println(tr("msg.serverOnlyURL") + " " + full)
+                                }
+                        }
+                }
+        }()
+
+        sig := make(chan os.Signal, 1)
+        signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+        <-sig
+        close(stop)
+        fmt.Println("SamVNC: shutting down (server-only mode).")
 }
 
 // onMenuItem is called when a tray menu item is clicked.
@@ -549,9 +601,13 @@ func (a *TrayApp) copyAddress() {
                 fullURL = url + sep + "token=" + token
         }
 
-        // Copy to clipboard.
+        // Copy to clipboard. If no clipboard tool exists (stock GNOME
+        // Wayland ships neither xclip nor wl-copy), fall back to a dialog
+        // with the URL in a selectable text field so the user can copy it
+        // manually — never fail silently.
         if err := copyToClipboard(fullURL); err != nil {
                 log.Printf("clipboard: %v", err)
+                showCopyFallback(fullURL)
                 return
         }
 
