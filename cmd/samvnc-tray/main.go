@@ -363,7 +363,13 @@ func (a *TrayApp) startServer() {
                         if strings.Contains(lower, "public url") ||
                                 strings.Contains(lower, "tunnel: public url") ||
                                 strings.Contains(line, "aitun.cc") {
-                                if u := urlRE.FindString(line); u != "" {
+                                if u := urlRE.FindString(line); u != "" && !strings.Contains(u, "<") {
+                                        // "<" rejects the placeholder in the
+                                        // keyless-mode hint line ("random
+                                        // https://aitun.cc/<code> URL") — that
+                                        // line matches "aitun.cc" but holds no
+                                        // real address, and grabbing it made
+                                        // Copy Address copy a bogus URL.
                                         a.mu.Lock()
                                         a.publicURL = u
                                         a.mu.Unlock()
