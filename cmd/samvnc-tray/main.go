@@ -54,10 +54,18 @@ func killStaleProcesses(tunnelKey string) {
         _ = exec.Command("taskkill", "/F", "/IM",
                 "samvnc-server.exe").Run()
 
-        // Kill stale aitun clients that carry OUR tunnel key on their
-        // command line. wmic is deprecated but still present on Windows
-        // 10/11; exec.Command passes args directly (no shell quoting risk).
         if tunnelKey == "" {
+                // Free proxy-address mode: our stale clients carry NO key on
+                // the command line, so match the shape samvnc spawns instead:
+                // an HTTP forward (-p <port>) with neither -k nor --tcp-ports.
+                // Keyed tunnels (ours, the user's own, the SSH port-22 bridge)
+                // always carry -k and/or --tcp-ports and are never touched.
+                filter := "name='aitun-client-windows-amd64.exe' and " +
+                                "commandline like '%-p %' and " +
+                                "not commandline like '%-k %' and " +
+                                "not commandline like '%--tcp-ports%'"
+                _ = exec.Command("wmic", "process", "where", filter,
+                                "call", "terminate").Run()
                 return
         }
         filter := fmt.Sprintf(
@@ -127,6 +135,9 @@ func main() {
                 }
         }
 
+        // Resolve the UI language (settings override, else system default).
+        SetLanguage(ResolveLang(s.Language))
+
         // Kill stale processes from a previous run (prevents "Tunnel occupied").
         // Needs the tunnel key so only OUR stale aitun clients are targeted.
         killStaleProcesses(s.AgentToken)
@@ -140,7 +151,7 @@ func main() {
         // Create tray.
         t := tray.New()
         t.SetCallback(app.onMenuItem)
-        t.SetTooltip("SamVNC — Stopped")
+        t.SetTooltip("SamVNC — " + tr("tip.stopped"))
         app.tray = t
 
         // Build initial menu.
@@ -176,7 +187,13 @@ func (a *TrayApp) onMenuItem(itemID string) {
         case "autostart_off":
                 a.toggleAutoStart(false)
         case "settings":
-                go a.openSettings()
+                // INLINE, not in a goroutine: the dialog runs a nested message pump
+                // on THIS thread (same pattern as TrackPopupMenu's modal loop). A
+                // dedicated goroutine can get pinned to the tray's locked OS thread
+                // by the scheduler and then starve forever behind GetMessage — that
+                // produced the frozen zombie dialog and a settingsDialogOpen guard
+                // stuck true, which silently ignored every later Settings click.
+                a.openSettings()
         case "copy_address":
                 a.copyAddress()
         case "exit":
@@ -199,7 +216,7 @@ func (a *TrayApp) startServer() {
 
         log.Printf("[tray] startServer called")
         a.refreshMenu()
-        a.tray.SetTooltip("SamVNC — Starting…")
+        a.tray.SetTooltip("SamVNC — " + tr("tip.starting"))
 
         // Find the samvnc-server binary.
         serverPath := findServerBinary()
@@ -209,7 +226,7 @@ func (a *TrayApp) startServer() {
                 a.state = stateStopped
                 a.mu.Unlock()
                 a.refreshMenu()
-                a.tray.SetTooltip("SamVNC — Error (server not found)")
+                a.tray.SetTooltip("SamVNC — " + tr("tip.noServer"))
                 return
         }
 
@@ -259,7 +276,7 @@ func (a *TrayApp) startServer() {
                 a.state = stateStopped
                 a.mu.Unlock()
                 a.refreshMenu()
-                a.tray.SetTooltip("SamVNC — Error (could not start)")
+                a.tray.SetTooltip("SamVNC — " + tr("tip.noStart"))
                 return
         }
         log.Printf("[tray] server started, PID=%d", cmd.Process.Pid)
@@ -271,7 +288,7 @@ func (a *TrayApp) startServer() {
         a.mu.Unlock()
 
         a.refreshMenu()
-        a.tray.SetTooltip("SamVNC — Running (waiting for URL…)")
+        a.tray.SetTooltip("SamVNC — " + tr("tip.waitingURL"))
 
         // Pump stdout to find the public URL.
         urlRE := regexp.MustCompile(`https?://[^\s]+`)
@@ -290,7 +307,7 @@ func (a *TrayApp) startServer() {
                                         a.mu.Lock()
                                         a.publicURL = u
                                         a.mu.Unlock()
-                                        a.tray.SetTooltip("SamVNC — Running")
+                                        a.tray.SetTooltip("SamVNC — " + tr("tip.running"))
                                         a.refreshMenu()
                                 }
                         }
@@ -310,7 +327,7 @@ func (a *TrayApp) startServer() {
                 a.cmd = nil
                 a.mu.Unlock()
                 a.refreshMenu()
-                a.tray.SetTooltip("SamVNC — Stopped")
+                a.tray.SetTooltip("SamVNC — " + tr("tip.stopped"))
         }()
 }
 
@@ -335,7 +352,7 @@ func (a *TrayApp) stopServer() {
                 log.Printf("[tray] server stopped")
         }
         a.refreshMenu()
-        a.tray.SetTooltip("SamVNC — Stopped")
+        a.tray.SetTooltip("SamVNC — " + tr("tip.stopped"))
 }
 
 // killProcessTree kills a process and all its children.
@@ -372,10 +389,18 @@ func (a *TrayApp) toggleAutoStart(enable bool) {
 }
 
 // openSettings opens a native GUI settings dialog.
+//
+// THREAD MODEL: runs ON the tray window thread (inline from onMenuItem).
+// The dialog blocks in a nested GetMessage pump here — the tray window
+// thread is the one thread guaranteed to keep pumping, and the nested pump
+// dispatches tray messages, so the tray/menu stay usable while the dialog
+// is up. Heavy post-OK work (file save, wmic, taskkill) is handed to a
+// goroutine so this thread returns to the pump quickly.
 func (a *TrayApp) openSettings() {
-        // Re-entrancy guard: the dialog pumps tray messages, so the tray
-        // menu can be opened again while the dialog is up. A nested dialog
-        // would share/overwrite the global dialogResult state.
+        // Re-entrancy guard: while the dialog pump is nested here it also
+        // dispatches tray messages, so "Settings..." can be clicked again while
+        // the dialog is up. A second dialog would share/overwrite the global
+        // dialogResult state.
         a.mu.Lock()
         if a.settingsDialogOpen {
                 a.mu.Unlock()
@@ -388,10 +413,12 @@ func (a *TrayApp) openSettings() {
                 Subdomain:  a.settings.Subdomain,
                 AuthToken:  a.settings.AuthToken,
                 AutoStart:  a.settings.AutoStart,
+                Language:   a.settings.Language,
         }
         publicURL := a.publicURL
         authToken := a.settings.AuthToken
         oldKey := a.settings.AgentToken
+        oldToken := a.settings.AuthToken
         wasRunning := a.state == stateRunning || a.state == stateStarting
         a.mu.Unlock()
 
@@ -401,7 +428,7 @@ func (a *TrayApp) openSettings() {
                 a.mu.Unlock()
         }()
 
-        // Open the dialog (blocks until user closes it).
+        // Open the dialog (blocks in the nested pump until the user closes it).
         newSettings, copyAddr, ok := openSettingsDialog(current, publicURL, authToken)
         if !ok {
                 // Even if user cancelled, they may have clicked Copy Address.
@@ -420,6 +447,18 @@ func (a *TrayApp) openSettings() {
                 log.Printf("[tray] access token cleared by user — new token generated")
         }
 
+        // Save and apply — OFF this thread. settings.Save does file I/O,
+        // killStaleProcesses shells out to wmic (multi-second), and the restart
+        // waits on taskkill; any of those would freeze the tray message pump.
+        go a.applySettings(newSettings, oldKey, oldToken, wasRunning)
+
+        _ = copyAddr // copy already done inside dialog
+}
+
+// applySettings persists the dialog result and activates it: saves JSON,
+// kills stale tunnel clients of the old key and restarts the server so the
+// new settings take effect. Runs on its own goroutine (see openSettings).
+func (a *TrayApp) applySettings(newSettings *settings.Settings, oldKey, oldToken string, wasRunning bool) {
         // Save and apply.
         a.mu.Lock()
         a.settings = newSettings
@@ -427,28 +466,46 @@ func (a *TrayApp) openSettings() {
 
         if err := settings.Save(newSettings); err != nil {
                 log.Printf("save settings: %v", err)
+        } else {
+                log.Printf("[tray] settings saved (key_len=%d token_len=%d lang=%s)",
+                        len(newSettings.AgentToken), len(newSettings.AuthToken), newSettings.Language)
         }
+
+        // Apply the UI language immediately: the menu rebuild below and the
+        // next dialog open render in the new language. No restart involved.
+        SetLanguage(ResolveLang(newSettings.Language))
 
         a.refreshMenu()
 
         // If the aitun key changed, kill stale tunnel clients that still
         // carry the OLD key. Without this, the previous client survives the
         // restart (startServer only kills clients matching the NEW key and
-        // killStaleProcesses("") is a no-op when the key was cleared) and
-        // the old tunnel/subdomain stays live — the clear appears to have
-        // no effect.
+        // killStaleProcesses("") would miss it) and the old tunnel/subdomain
+        // stays live — the change appears to have no effect.
+        //
+        // Mode switches need cleanup in BOTH directions: switching to no-key
+        // leaves keyed zombies behind, and switching to a key leaves
+        // anonymous free-mode zombies behind (whose random proxy URL would
+        // keep forwarding to this machine for up to 24h). The anonymous
+        // cleanup only targets keyless HTTP forwards, never keyed tunnels.
         if newSettings.AgentToken != oldKey {
                 log.Printf("[tray] aitun key changed — killing stale clients of the old key")
                 killStaleProcesses(oldKey)
+                if oldKey == "" || newSettings.AgentToken == "" {
+                        killStaleProcesses("")
+                }
         }
 
-        // If server is running, restart it to apply new settings.
-        if wasRunning {
+        // Restart only when something the SERVER cares about changed (the
+        // tunnel key or the auth token). Pure UI changes (language,
+        // auto-start) must not bounce the tunnel — a restart briefly drops
+        // the public URL and makes the aitun client reconnect for nothing.
+        serverRelevant := newSettings.AgentToken != oldKey ||
+                newSettings.AuthToken != oldToken
+        if wasRunning && serverRelevant {
                 a.stopServer()
                 go a.startServer()
         }
-
-        _ = copyAddr // copy already done inside dialog
 }
 
 // copyAddress copies the public URL with auth token to the clipboard.
@@ -459,16 +516,16 @@ func (a *TrayApp) copyAddress() {
         a.mu.Unlock()
 
         if url == "" {
-                a.tray.SetTooltip("SamVNC — No URL yet (server not ready)")
+                a.tray.SetTooltip("SamVNC — " + tr("tip.noURL"))
                 go func() {
                         // Restore tooltip after a moment.
                         a.mu.Lock()
                         st := a.state
                         a.mu.Unlock()
                         if st == stateRunning {
-                                a.tray.SetTooltip("SamVNC — Running")
+                                a.tray.SetTooltip("SamVNC — " + tr("tip.running"))
                         } else {
-                                a.tray.SetTooltip("SamVNC — Stopped")
+                                a.tray.SetTooltip("SamVNC — " + tr("tip.stopped"))
                         }
                 }()
                 return
@@ -490,16 +547,16 @@ func (a *TrayApp) copyAddress() {
                 return
         }
 
-        a.tray.SetTooltip("SamVNC — Address copied!")
+        a.tray.SetTooltip("SamVNC — " + tr("tip.copied"))
         go func() {
                 // Restore tooltip after a moment.
                 a.mu.Lock()
                 st := a.state
                 a.mu.Unlock()
                 if st == stateRunning {
-                        a.tray.SetTooltip("SamVNC — Running")
+                        a.tray.SetTooltip("SamVNC — " + tr("tip.running"))
                 } else {
-                        a.tray.SetTooltip("SamVNC — Stopped")
+                        a.tray.SetTooltip("SamVNC — " + tr("tip.stopped"))
                 }
         }()
 }
@@ -518,28 +575,30 @@ func (a *TrayApp) refreshMenu() {
         if state == stateRunning || state == stateStarting {
                 items = append(items, tray.MenuItem{
                         ID:    "stop",
-                        Label: "Stop",
+                        Label: tr("menu.stop"),
                 })
         } else {
                 items = append(items, tray.MenuItem{
                         ID:    "start",
-                        Label: "Start",
+                        Label: tr("menu.start"),
                 })
         }
 
         items = append(items, tray.MenuItem{Separator: true})
 
-        // Auto-start toggle (mutually exclusive).
+        // Auto-start toggle (mutually exclusive). The native MFS_CHECKED
+        // state draws the checkmark — do NOT also put "✓" in the label,
+        // that produced the double-checkmark "✓✓" bug.
         if autoStart {
                 items = append(items, tray.MenuItem{
                         ID:      "autostart_off",
-                        Label:   "✓ Auto-start on boot",
+                        Label:   tr("menu.autostart"),
                         Checked: true,
                 })
         } else {
                 items = append(items, tray.MenuItem{
                         ID:    "autostart_on",
-                        Label: "Auto-start on boot",
+                        Label: tr("menu.autostart"),
                 })
         }
 
@@ -548,13 +607,13 @@ func (a *TrayApp) refreshMenu() {
         // Settings.
         items = append(items, tray.MenuItem{
                 ID:    "settings",
-                Label: "Settings...",
+                Label: tr("menu.settings"),
         })
 
         // Copy Address.
         items = append(items, tray.MenuItem{
                 ID:       "copy_address",
-                Label:    "Copy Address",
+                Label:    tr("menu.copy"),
                 Disabled: !hasURL,
         })
 
@@ -563,7 +622,7 @@ func (a *TrayApp) refreshMenu() {
         // Exit.
         items = append(items, tray.MenuItem{
                 ID:    "exit",
-                Label: "Exit",
+                Label: tr("menu.exit"),
         })
 
         a.tray.SetMenu(items)

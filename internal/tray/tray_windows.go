@@ -7,7 +7,6 @@ import (
         "os"
         "path/filepath"
         "runtime"
-        "sort"
         "sync"
         "syscall"
         "time"
@@ -834,9 +833,13 @@ func (t *winTray) addToVisibleItems(parent, val uint32) {
         if visibleItems, exists := t.visibleItems[parent]; !exists {
                 t.visibleItems[parent] = []uint32{val}
         } else {
-                newvisible := append(visibleItems, val)
-                sort.Slice(newvisible, func(i, j int) bool { return newvisible[i] < newvisible[j] })
-                t.visibleItems[parent] = newvisible
+                // IMPORTANT: append in ARRIVAL order — this list mirrors the real
+                // menu item positions (getVisibleItemIndex feeds InsertMenuItem).
+                // The old sort-by-ID broke the popup layout: separators use the
+                // 2090+n range while action items are 2101+, so every separator's
+                // "index" resolved ABOVE the first real item and all three lines
+                // rendered as a lump of horizontal rules above "Stop".
+                t.visibleItems[parent] = append(visibleItems, val)
         }
 }
 

@@ -254,6 +254,12 @@ func startTunnel(cfg config.Config, port int, srv *server.Server, agentToken str
                 srv.SetRelayURL("https://" + sub.DomainURL)
         }
 
+        if tunnelToken == "" && agentToken == "" {
+                log.Printf("[samvnc] no aitun key configured — starting free " +
+                        "proxy-address mode (random https://aitun.cc/<code> URL, valid ~24h; " +
+                        "set a key in the tray settings for a permanent subdomain)")
+        }
+
         tcfg := tunnel.Config{
                 Binary:    cfg.Tunnel.Binary,
                 Token:     tunnelToken,

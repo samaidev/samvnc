@@ -19,6 +19,7 @@ import (
         "os/exec"
         "path/filepath"
         "regexp"
+        "runtime"
         "strings"
         "sync"
         "time"
@@ -196,6 +197,21 @@ func resolveBinary(explicit string) (string, error) {
                         return p, nil
                 }
         }
+        // Prefer a client binary bundled next to the server binary (the
+        // release zip ships samvnc-server.exe + aitun-client-windows-amd64.exe
+        // in one directory). Bundling pins the tunnel protocol version; a
+        // stale client found on PATH can fail its handshake against the
+        // current relay in an endless retry loop (observed as "bad handshake"
+        // storms in anonymous/free mode).
+        if self, err := os.Executable(); err == nil {
+                dir := filepath.Dir(self)
+                for _, name := range bundledClientNames() {
+                        p := filepath.Join(dir, name)
+                        if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+                                return p, nil
+                        }
+                }
+        }
         for _, name := range []string{"aitun", "aitun-client"} {
                 if p, err := exec.LookPath(name); err == nil {
                         return p, nil
@@ -212,6 +228,16 @@ func resolveBinary(explicit string) (string, error) {
                 }
         }
         return "", errors.New("tunnel: aitun client not found (install with `pip install aitun` or see https://aitun.cc)")
+}
+
+// bundledClientNames returns the expected file names of an aitun client
+// binary for this platform, as shipped in the release archive.
+func bundledClientNames() []string {
+        name := fmt.Sprintf("aitun-client-%s-%s", runtime.GOOS, runtime.GOARCH)
+        if runtime.GOOS == "windows" {
+                return []string{name + ".exe", "aitun-client.exe", "aitun.exe"}
+        }
+        return []string{name}
 }
 
 // LocalIPv4 returns the best-guess outbound IPv4 address, used by the relay
