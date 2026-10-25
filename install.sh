@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# samvnc-server official installer for Linux/macOS — GitHub Releases based
+# SamVNC official installer for Linux/macOS — GitHub Releases based
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/samaidev/samvnc/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/samaidev/samvnc/main/install.sh | bash -s -- --version v1.2.0
+#   curl -fsSL https://raw.githubusercontent.com/samaidev/samvnc/main/install.sh | bash -s -- --version v1.4.1
 #
-# Downloads the samvnc-server binary for the current platform from the
-# samaidev/samvnc GitHub Releases and installs it to /usr/local/bin
-# (with root) or ~/.local/bin (without root).
+# Downloads the samvnc-server AND samvnc-tray binaries for the current
+# platform from the samaidev/samvnc GitHub Releases and installs them to
+# /usr/local/bin (with root) or ~/.local/bin (without root).
+#
+# `samvnc-tray` is the recommended start command: it brings up the native
+# system tray (one unified icon on Windows/macOS/Linux) and launches the
+# server automatically. On headless machines (SSH, no desktop) the tray
+# binary detects the missing GUI and falls back to server-only mode, so
+# the same command works everywhere.
 #
 # Package downloads are hosted on GitHub Releases:
 #   https://github.com/samaidev/samvnc/releases
@@ -16,13 +22,14 @@ set -euo pipefail
 
 REPO="samaidev/samvnc"
 BIN_NAME="samvnc-server"
+TRAY_NAME="samvnc-tray"
 INSTALL_DIR=""
 REQUESTED_VERSION=""
 
 # Fallback: the most recent release known to ship every platform binary.
 # If the latest release does not include your platform, we retry from here
 # so the one-line install keeps working between releases.
-FALLBACK_TAG="v1.2.0"
+FALLBACK_TAG="v1.4.1"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -54,6 +61,7 @@ case "$ARCH" in
     *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 REMOTE_FILE="samvnc-server-${PLATFORM_OS}-${PLATFORM_ARCH}"
+TRAY_REMOTE_FILE="samvnc-tray-${PLATFORM_OS}-${PLATFORM_ARCH}"
 echo "Detected platform: ${PLATFORM_OS}-${PLATFORM_ARCH}"
 
 # --- install dir --------------------------------------------------------
@@ -83,59 +91,83 @@ fetch() { # fetch <url> <dest>
     fi
 }
 
-TMP_FILE="$(mktemp)"
-trap 'rm -f "$TMP_FILE"' EXIT
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
-try_download() { # try_download <tag-or-latest> ; returns 0 on success
-    local tag="$1"
+try_download() { # try_download <remote-file> <tag-or-latest> <dest> ; returns 0 on success
+    local file="$1" tag="$2" dest="$3"
     local url
     if [[ "$tag" == "latest" ]]; then
-        url="https://github.com/${REPO}/releases/latest/download/${REMOTE_FILE}"
+        url="https://github.com/${REPO}/releases/latest/download/${file}"
     else
-        url="https://github.com/${REPO}/releases/download/${tag}/${REMOTE_FILE}"
+        url="https://github.com/${REPO}/releases/download/${tag}/${file}"
     fi
     echo "Downloading ${url}"
-    if fetch "$url" "$TMP_FILE" 2>/dev/null; then
-        [[ -s "$TMP_FILE" ]] && return 0
+    if fetch "$url" "$dest" 2>/dev/null; then
+        [[ -s "$dest" ]] && return 0
     fi
     return 1
 }
 
-# --- download with fallbacks --------------------------------------------
-SOURCE_TAG=""
-if [[ -n "$REQUESTED_VERSION" ]]; then
-    try_download "$REQUESTED_VERSION" || {
-        echo "ERROR: asset ${REMOTE_FILE} not found in release ${REQUESTED_VERSION}." >&2
-        echo "Check https://github.com/${REPO}/releases for available assets." >&2
-        exit 1
-    }
-    SOURCE_TAG="$REQUESTED_VERSION"
-else
-    if try_download latest; then
-        SOURCE_TAG="latest"
-    elif try_download "$FALLBACK_TAG"; then
-        SOURCE_TAG="$FALLBACK_TAG"
-        echo "NOTE: latest release does not ship ${REMOTE_FILE} (Windows-only latest)." >&2
-        echo "      Fell back to ${FALLBACK_TAG}, the last release with all-platform binaries." >&2
-    else
-        echo "ERROR: could not download ${REMOTE_FILE} from GitHub Releases." >&2
-        echo "Please grab it manually from: https://github.com/${REPO}/releases" >&2
-        exit 1
-    fi
-fi
+install_asset() { # install_asset <remote-file> <dest-name> <required:yes/no>
+    local file="$1" name="$2" required="$3"
+    local dest="${TMP_DIR}/${file}"
+    local tag=""
 
-# --- install ------------------------------------------------------------
-chmod +x "$TMP_FILE"
-if [[ -w "$INSTALL_DIR" ]] || [[ "$(id -u)" == "0" ]]; then
-    mv -f "$TMP_FILE" "${INSTALL_DIR}/${BIN_NAME}"
-    trap - EXIT
+    if [[ -n "$REQUESTED_VERSION" ]]; then
+        try_download "$file" "$REQUESTED_VERSION" "$dest" || {
+            if [[ "$required" == "yes" ]]; then
+                echo "ERROR: asset ${file} not found in release ${REQUESTED_VERSION}." >&2
+                echo "Check https://github.com/${REPO}/releases for available assets." >&2
+                exit 1
+            fi
+            return 1
+        }
+        tag="$REQUESTED_VERSION"
+    else
+        if try_download "$file" latest "$dest"; then
+            tag="latest"
+        elif try_download "$file" "$FALLBACK_TAG" "$dest"; then
+            tag="$FALLBACK_TAG"
+            echo "NOTE: latest release does not ship ${file}." >&2
+            echo "      Fell back to ${FALLBACK_TAG}." >&2
+        else
+            if [[ "$required" == "yes" ]]; then
+                echo "ERROR: could not download ${file} from GitHub Releases." >&2
+                echo "Please grab it manually from: https://github.com/${REPO}/releases" >&2
+                exit 1
+            fi
+            return 1
+        fi
+    fi
+
+    chmod +x "$dest"
+    if [[ -w "$INSTALL_DIR" ]] || [[ "$(id -u)" == "0" ]]; then
+        mv -f "$dest" "${INSTALL_DIR}/${name}"
+    else
+        echo "Need write permission for ${INSTALL_DIR}, using sudo..."
+        sudo mv -f "$dest" "${INSTALL_DIR}/${name}"
+    fi
+    echo "Installed: ${INSTALL_DIR}/${name} (${tag})"
+}
+
+# --- install: server (required) + tray (best effort) ---------------------
+install_asset "$REMOTE_FILE" "$BIN_NAME" yes
+if install_asset "$TRAY_REMOTE_FILE" "$TRAY_NAME" no; then
+    TRAY_OK=1
 else
-    echo "Need write permission for ${INSTALL_DIR}, using sudo..."
-    sudo mv -f "$TMP_FILE" "${INSTALL_DIR}/${BIN_NAME}"
-    trap - EXIT
+    TRAY_OK=0
+    echo "NOTE: no ${TRAY_REMOTE_FILE} asset in this release — skipped." >&2
+    echo "      The tray UI is not available for this platform yet;" >&2
+    echo "      start the server directly with 'samvnc-server --verbose'." >&2
 fi
 
 echo ""
-echo "Installed: ${INSTALL_DIR}/${BIN_NAME} (${SOURCE_TAG})"
-echo "Run 'samvnc-server --verbose' to start — it prints your public access URL."
+if [[ "$TRAY_OK" == "1" ]]; then
+    echo "Run 'samvnc-tray' to start — it shows the system-tray icon and"
+    echo "launches the server automatically (on headless machines it runs"
+    echo "the server in the foreground instead and prints the public URL)."
+else
+    echo "Run 'samvnc-server --verbose' to start — it prints your public access URL."
+fi
 echo "Re-run this installer anytime to update."
