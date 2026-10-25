@@ -14,6 +14,7 @@ package tray
 
 import (
         "bytes"
+        "errors"
         "fmt"
         "image"
         "image/color"
@@ -115,7 +116,7 @@ func (t *linuxTray) Run() error {
 
         // Listen for menu activation events from the host (shell).
         if err := conn.AddMatchSignal(
-                dbus.WithMatchObjectPath(sniPath, menuIface),
+                dbus.WithMatchObjectPath(dbus.ObjectPath(sniPath)),
                 dbus.WithMatchInterface(menuIface),
                 dbus.WithMatchMember("Event"),
         ); err != nil {
@@ -349,8 +350,8 @@ type propsMethods struct{ t *linuxTray }
 func (m propsMethods) Get(iface, name string) (dbus.Variant, *dbus.Error) {
         v, ok := m.t.lookupProp(iface, name)
         if !ok {
-                return dbus.MakeVariant(nil), dbus.MakeFailedError(
-                        fmt.Sprintf("unknown property %s.%s", iface, name))
+                return dbus.MakeVariant(nil), dbus.MakeFailedError(errors.New(
+                        fmt.Sprintf("unknown property %s.%s", iface, name)))
         }
         return dbus.MakeVariant(v), nil
 }
@@ -366,7 +367,7 @@ func (m propsMethods) GetAll(iface string) (map[string]dbus.Variant, *dbus.Error
 }
 
 func (m propsMethods) Set(iface, name string, v dbus.Variant) *dbus.Error {
-        return dbus.MakeFailedError("read-only property")
+        return dbus.MakeFailedError(errors.New("read-only property"))
 }
 
 // propNames lists supported properties per interface.
@@ -464,16 +465,16 @@ type MenuLayoutItem struct {
 func (m *menuMethods) GetLayout(parentID int32, depth int32,
         props []string) (uint32, MenuLayoutItem, *dbus.Error) {
 
-        t.mu.Lock()
-        defer t.mu.Unlock()
+        m.t.mu.Lock()
+        defer m.t.mu.Unlock()
 
         root := MenuLayoutItem{ID: 0, Props: map[string]dbus.Variant{
                 "children-display": dbus.MakeVariant("submenu"),
         }}
-        for _, r := range t.items {
-                root.Children = append(root.Children, m.rowToLayout(&r))
+        for i := range m.t.items {
+                root.Children = append(root.Children, m.rowToLayout(&m.t.items[i]))
         }
-        return t.rev, root, nil
+        return m.t.rev, root, nil
 }
 
 func (m *menuMethods) rowToLayout(r *menuRow) MenuLayoutItem {
@@ -514,15 +515,15 @@ type MenuGroupProp struct {
 func (m *menuMethods) GetGroupProperties(ids []int32, props []string,
 ) ([]MenuGroupProp, *dbus.Error) {
 
-        t.mu.Lock()
-        defer t.mu.Unlock()
+        m.t.mu.Lock()
+        defer m.t.mu.Unlock()
         want := map[int32]bool{}
         for _, id := range ids {
                 want[id] = true
         }
         var out []MenuGroupProp
-        for i := range t.items {
-                r := &t.items[i]
+        for i := range m.t.items {
+                r := &m.t.items[i]
                 if len(ids) > 0 && !want[r.id] {
                         continue
                 }
@@ -533,10 +534,10 @@ func (m *menuMethods) GetGroupProperties(ids []int32, props []string,
 
 func (m *menuMethods) GetProperty(id int32, name string,
 ) (dbus.Variant, *dbus.Error) {
-        t.mu.Lock()
-        defer t.mu.Unlock()
-        for i := range t.items {
-                r := &t.items[i]
+        m.t.mu.Lock()
+        defer m.t.mu.Unlock()
+        for i := range m.t.items {
+                r := &m.t.items[i]
                 if r.id != id {
                         continue
                 }
