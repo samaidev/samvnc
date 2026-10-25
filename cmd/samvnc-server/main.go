@@ -12,7 +12,8 @@
 //        -quality low|medium|high
 //        -mode auto|p2p|relay
 //        -fps <n>              frame rate cap (default 30)
-//        -token <token>        client auth token (empty disables auth)
+//        -token <token>        client auth token (auto-generated and persisted in
+//                              <data-dir>/auth_token when empty — auth is never disabled)
 //        -tunnel on|off        spawn the aitun.cc client (default on)
 //        -aitun-agent-token <t>  aitun.cc agent token (aitagt_...) for auto subdomain
 //        -aitun-subdomain <s>  request a specific short subdomain (auto-generates if empty)
@@ -37,6 +38,7 @@ import (
         "net/http"
         "os"
         "os/signal"
+        "path/filepath"
         "strconv"
         "strings"
         "syscall"
@@ -45,6 +47,7 @@ import (
         "github.com/samaidev/samvnc/internal/aitunmgr"
         "github.com/samaidev/samvnc/internal/config"
         "github.com/samaidev/samvnc/internal/server"
+        "github.com/samaidev/samvnc/internal/settings"
         "github.com/samaidev/samvnc/internal/substore"
         "github.com/samaidev/samvnc/internal/tunnel"
 )
@@ -56,7 +59,7 @@ func main() {
         quality := flag.String("quality", cfg.DefaultQuality, "quality preset: low|medium|high")
         mode := flag.String("mode", cfg.Mode, "connection mode: auto|p2p|relay")
         fps := flag.Int("fps", cfg.MaxFPS, "frame rate cap")
-        token := flag.String("token", cfg.AuthToken, "client auth token (empty disables)")
+        token := flag.String("token", cfg.AuthToken, "client auth token (auto-generated and persisted in <data-dir>/auth_token when empty)")
         tunnelOn := flag.Bool("tunnel", cfg.Tunnel.Enabled, "spawn the aitun.cc client")
         aitunAgentToken := flag.String("aitun-agent-token", "", "aitun.cc agent token (aitagt_...) for auto subdomain registration")
         aitunSub := flag.String("aitun-subdomain", cfg.Tunnel.Subdomain, "aitun.cc subdomain name (auto-generated if empty)")
@@ -101,6 +104,25 @@ func main() {
         log.SetFlags(log.LstdFlags | log.Lmicroseconds)
         log.Printf("SamVNC starting (quality=%s mode=%s fps=%d clipboard=%v cdp=%s)",
                 cfg.DefaultQuality, cfg.Mode, cfg.MaxFPS, cfg.Clipboard, cfg.CDPAddr)
+
+        // Auto-generate the access token when none is provided. An empty
+        // token used to DISABLE auth — with a public tunnel URL that meant
+        // anyone who found the URL could control the desktop. Instead, a
+        // random token is generated and persisted in <data-dir>/auth_token
+        // so the printed URL keeps working across restarts. (The tray app
+        // always passes its own -token, so this only affects standalone runs.)
+        if cfg.AuthToken == "" {
+                tok, generated, err := loadOrGenAuthToken(cfg.DataDir)
+                if err != nil {
+                        log.Printf("[samvnc] warning: could not persist auto-generated token: %v", err)
+                }
+                cfg.AuthToken = tok
+                if generated {
+                        log.Printf("[samvnc] no token configured — auto-generated access token: %s", tok)
+                } else {
+                        log.Printf("[samvnc] reusing saved access token: %s", tok)
+                }
+        }
 
         srv := server.New(cfg, "")
 
@@ -252,6 +274,11 @@ func startTunnel(cfg config.Config, port int, srv *server.Server, agentToken str
                 log.Printf("[samvnc] subdomain ready: %s (id=%s)", sub.DomainURL, sub.ID)
                 log.Printf("[samvnc] public URL: https://%s", sub.DomainURL)
                 srv.SetRelayURL("https://" + sub.DomainURL)
+                if cfg.AuthToken != "" {
+                        log.Printf("[samvnc] access token: %s", cfg.AuthToken)
+                        log.Printf("[samvnc] open in browser: %s",
+                                urlWithToken("https://"+sub.DomainURL, cfg.AuthToken))
+                }
         }
 
         if tunnelToken == "" && agentToken == "" {
@@ -278,6 +305,10 @@ func startTunnel(cfg config.Config, port int, srv *server.Server, agentToken str
         if u := t.URL(); u != "" {
                 srv.SetRelayURL(u)
                 log.Printf("public URL: %s", u)
+                if cfg.AuthToken != "" {
+                        log.Printf("access token: %s", cfg.AuthToken)
+                        log.Printf("open in browser: %s", urlWithToken(u, cfg.AuthToken))
+                }
                 log.Printf("open this URL in any browser to control the desktop remotely")
         }
         go func() {
@@ -331,6 +362,39 @@ func randHex(n int) string {
                 return "000000"
         }
         return hex.EncodeToString(b)
+}
+
+// urlWithToken appends the auth token to a public URL as ?token=…
+// (or &token=… when the URL already carries a query string).
+func urlWithToken(u, token string) string {
+        if token == "" {
+                return u
+        }
+        sep := "?"
+        if strings.Contains(u, "?") {
+                sep = "&"
+        }
+        return u + sep + "token=" + token
+}
+
+// loadOrGenAuthToken returns the persisted access token from
+// <dataDir>/auth_token, generating and saving a fresh one when missing.
+// The file is written with mode 0600 (it IS the desktop access secret).
+func loadOrGenAuthToken(dataDir string) (token string, generated bool, err error) {
+        p := filepath.Join(dataDir, "auth_token")
+        if b, rerr := os.ReadFile(p); rerr == nil {
+                if t := strings.TrimSpace(string(b)); t != "" {
+                        return t, false, nil
+                }
+        }
+        t := settings.GenerateToken()
+        if merr := os.MkdirAll(dataDir, 0o755); merr != nil {
+                return t, true, merr
+        }
+        if werr := os.WriteFile(p, []byte(t+"\n"), 0o600); werr != nil {
+                return t, true, werr
+        }
+        return t, true, nil
 }
 
 func portFromAddr(addr string) int {

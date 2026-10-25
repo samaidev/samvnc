@@ -93,6 +93,7 @@ const (
         idGroupConn       = 1016 // "Connection" group box
         idGroupGeneral    = 1017 // "General" group box
         idLabelAddrCap    = 1018 // "Current Address" caption above the URL row
+        idBtnRegenToken   = 1019 // "Regenerate" button next to the Access Token edit
 )
 
 var (
@@ -345,6 +346,15 @@ func settingsDlgProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) uint
                                 setWindowText(hwnd, idLabelAddr, tr("dlg.copied")+fullURL)
                         }
                         return 0
+
+                case idBtnRegenToken:
+                        // Fill the Access Token edit with a fresh random token.
+                        // The user sees the new value and applies it with OK
+                        // (a follow-up restart bounces the tunnel automatically).
+                        tok := settings.GenerateToken()
+                        setWindowText(hwnd, idEditAuthToken, tok)
+                        log.Printf("[settings] token regenerated in dialog (len=%d)", len(tok))
+                        return 0
                 }
 
         case WM_CLOSE:
@@ -538,12 +548,16 @@ func openSettingsDialog(s *settings.Settings, publicURL, authToken string) (newS
                 uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL), idEditAgentKey,
                 editX, 114, editW, editH, dialogHwnd)
 
-        // Auth token label + edit
+        // Auth token label + edit (edit narrowed so the Regenerate button
+        // fits on the same row).
         createControl("STATIC", tr("dlg.token"), uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelAuthToken,
                 labelX, 156, labelW, 20, dialogHwnd)
         createControlEx("EDIT", s.AuthToken, uintptr(WS_EX_CLIENTEDGE),
                 uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL), idEditAuthToken,
-                editX, 152, editW, editH, dialogHwnd)
+                editX, 152, 246, editH, dialogHwnd)
+        regenW := 112
+        createControl("BUTTON", tr("dlg.btnRegen"), uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON), idBtnRegenToken,
+                editX+246+8, 152, regenW, editH, dialogHwnd)
 
         // ---- General group ----
         createControl("BUTTON", tr("dlg.groupGeneral"),

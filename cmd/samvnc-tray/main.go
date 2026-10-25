@@ -362,6 +362,7 @@ func (a *TrayApp) startServer() {
                         lower := strings.ToLower(line)
                         if strings.Contains(lower, "public url") ||
                                 strings.Contains(lower, "tunnel: public url") ||
+                                strings.Contains(lower, "open in browser") ||
                                 strings.Contains(line, "aitun.cc") {
                                 if u := urlRE.FindString(line); u != "" && !strings.Contains(u, "<") {
                                         // "<" rejects the placeholder in the
@@ -370,6 +371,17 @@ func (a *TrayApp) startServer() {
                                         // line matches "aitun.cc" but holds no
                                         // real address, and grabbing it made
                                         // Copy Address copy a bogus URL.
+                                        //
+                                        // The server may also print the URL
+                                        // with the auth token appended
+                                        // (?token=…) in its "open in browser"
+                                        // line. The tray appends the token
+                                        // itself in copyAddress, so strip any
+                                        // query string to avoid the duplicate
+                                        // "?token=…&token=…" shape.
+                                        if i := strings.IndexByte(u, '?'); i >= 0 {
+                                                u = u[:i]
+                                        }
                                         a.mu.Lock()
                                         a.publicURL = u
                                         a.mu.Unlock()
