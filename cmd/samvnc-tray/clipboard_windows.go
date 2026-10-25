@@ -45,3 +45,8 @@ func copyToClipboardWindows(text string) error {
 	procCloseClipboard.Call()
 	return nil
 }
+
+// copyToClipboard is the platform entry point used by main.go.
+func copyToClipboard(text string) error {
+	return copyToClipboardWindows(text)
+}

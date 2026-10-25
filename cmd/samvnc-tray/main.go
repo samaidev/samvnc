@@ -670,27 +670,6 @@ func findSelfPath() string {
         return os.Args[0]
 }
 
-// copyToClipboard copies text to the system clipboard.
-func copyToClipboard(text string) error {
-        switch runtime.GOOS {
-        case "windows":
-                return copyToClipboardWindows(text)
-        case "darwin":
-                cmd := exec.Command("pbcopy")
-                cmd.Stdin = strings.NewReader(text)
-                return cmd.Run()
-        default:
-                // Try xclip, then xsel.
-                for _, tool := range []string{"xclip", "xsel"} {
-                        if p, err := exec.LookPath(tool); err == nil {
-                                cmd := exec.Command(p)
-                                cmd.Stdin = strings.NewReader(text)
-                                if tool == "xclip" {
-                                        cmd.Args = append(cmd.Args, "-selection", "clipboard")
-                                }
-                                return cmd.Run()
-                        }
-                }
-        }
-        return fmt.Errorf("no clipboard tool available")
-}
+// copyToClipboard is implemented per-platform in clipboard_windows.go
+// and clipboard_other.go (the windows-only helper cannot be referenced
+// from shared code — it breaks cross-compilation).
