@@ -1,16 +1,14 @@
 // tray_darwin.m — Cocoa side of the macOS tray (NSStatusItem + NSMenu).
 // Compiled by cgo on darwin only (.m files are darwin-only per go/build).
 // Manual reference counting (no ARC under cgo).
+//
+// NOTE: NativeMenuItem is typedef'd in the cgo preamble of
+// tray_darwin.go, which cgo injects into THIS compilation unit — do not
+// redefine it here.
 #import <Cocoa/Cocoa.h>
 #include <stdlib.h>
 #include <string.h>
 #include "_cgo_export.h"
-
-// NativeMenuItem mirrors the struct in tray_darwin.go.
-typedef struct { char* label; char* id; int flags; } NativeMenuItem;
-
-static NSStatusItem *g_statusItem = nil;
-static SamVNCHolder *g_holder = nil;
 
 // SamVNCHolder is the menu item target; clicks bounce back into Go.
 @interface SamVNCHolder : NSObject
@@ -22,6 +20,9 @@ static SamVNCHolder *g_holder = nil;
     }
 }
 @end
+
+static NSStatusItem *g_statusItem = nil;
+static SamVNCHolder *g_holder = nil;
 
 static void ensureHolder(void) {
     if (!g_holder) {
