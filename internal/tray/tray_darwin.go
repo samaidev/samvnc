@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin && cgo
 
 // Package tray — macOS implementation backed by NSStatusItem + NSMenu
 // (Cocoa, via cgo). The main goroutine is pinned to the process main

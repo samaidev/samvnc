@@ -1,10 +1,10 @@
-//go:build !linux && !windows
+//go:build !linux && !windows && !darwin
 
 package capture
 
 import (
-	"errors"
-	"image"
+        "errors"
+        "image"
 )
 
 type stubCapturer struct{}
