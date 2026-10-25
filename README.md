@@ -59,6 +59,13 @@ All endpoints accept JSON and return JSON. They work both on the local
 port and behind an aitun path prefix (the server matches `/api/`
 anywhere in the path).
 
+**Auth:** except for `/api/status`, every call requires the access
+token (the same one used by the browser session): append
+`?token=<token>` or send an `X-SamVNC-Token` header. The token is
+auto-generated on first run (`~/.samvnc/settings.json` for the tray,
+`~/.samvnc/auth_token` for standalone server runs) and can be
+rotated any time via the Regenerate button in the tray settings.
+
 ### Status & screenshots
 
 | Method | Path                | Body / Query            | Description                          |
