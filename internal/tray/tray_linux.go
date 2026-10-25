@@ -456,10 +456,17 @@ type ToolTip struct {
 type menuMethods struct{ t *linuxTray }
 
 // MenuLayoutItem is one node of the GetLayout response tree.
+//
+// Children is []interface{} on purpose: godbus derives the STATIC
+// signature of an interface slice as "av" (variants) instead of trying
+// to recurse into the element type — a []MenuLayoutItem would make the
+// signature derivation loop forever ("container nesting too deep"
+// panic). At encode time godbus walks the actual VALUE tree, which is
+// finite (plain menus have no submenus). Same trick as DeedleFake/tray.
 type MenuLayoutItem struct {
         ID       int32
         Props    map[string]dbus.Variant
-        Children []MenuLayoutItem
+        Children []interface{}
 }
 
 func (m *menuMethods) GetLayout(parentID int32, depth int32,
@@ -481,7 +488,7 @@ func (m *menuMethods) rowToLayout(r *menuRow) MenuLayoutItem {
         return MenuLayoutItem{
                 ID:       r.id,
                 Props:    m.rowProps(r),
-                Children: []MenuLayoutItem{},
+                Children: []interface{}{},
         }
 }
 
