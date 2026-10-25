@@ -546,7 +546,8 @@ func (m *menuMethods) GetProperty(id int32, name string,
                         return v, nil
                 }
         }
-        return dbus.MakeVariant(nil), dbus.MakeFailedError("no such item")
+        return dbus.MakeVariant(nil), dbus.MakeFailedError(
+                errors.New("no such item"))
 }
 
 func (m *menuMethods) AboutToShow(parentID int32) (bool, *dbus.Error) {
