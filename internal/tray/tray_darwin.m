@@ -23,11 +23,28 @@
 
 static NSStatusItem *g_statusItem = nil;
 static SamVNCHolder *g_holder = nil;
+// Embedded cross-platform icon (same artwork as the Windows tray icon),
+// handed over from Go before nativeTrayRun. Created lazily on the main
+// thread in ensureStatusItem (NSImage must be used from the main thread).
+static NSData *g_iconPNG = nil;
 
 static void ensureHolder(void) {
     if (!g_holder) {
         g_holder = [[SamVNCHolder alloc] init];
     }
+}
+
+// nativeTraySetIconPNG receives the embedded PNG bytes from Go. Called
+// before nativeTrayRun; only stores the data — the NSImage is created on
+// the main thread later (ensureStatusItem).
+void nativeTraySetIconPNG(const char *bytes, int len) {
+    if (!bytes || len <= 0) return;
+    NSData *d = [NSData dataWithBytes:bytes length:(NSUInteger)len];
+    // Store with a retain; g_iconPNG is only replaced/created here (before
+    // the main thread touches it), so no extra synchronization is needed.
+    [d retain];
+    [g_iconPNG release];
+    g_iconPNG = d;
 }
 
 static NSImage *defaultIcon(void) {
@@ -62,10 +79,23 @@ static void ensureStatusItem(void) {
     }
     if (g_statusItem && !g_statusItem.button.image) {
         @try {
-            NSImage *img = defaultIcon();
-            img.size = NSMakeSize(18, 18);
-            g_statusItem.button.image = img;
-            [img release];
+            NSImage *img = nil;
+            if (g_iconPNG) {
+                // Cross-platform unified icon: the exact same blue "V"
+                // artwork as the Windows tray. NSImage initWithData
+                // handles PNG natively.
+                img = [[NSImage alloc] initWithData:g_iconPNG];
+            }
+            if (!img) {
+                img = defaultIcon();
+            }
+            if (img) {
+                // Menu bar icons render at ~18-22pt; keep the colored
+                // (non-template) artwork so all three platforms match.
+                img.size = NSMakeSize(18, 18);
+                g_statusItem.button.image = img;
+                [img release];
+            }
         } @catch (NSException *e) {
             // No WindowServer access for offscreen drawing: fall back to
             // a plain text badge so the tray still works.

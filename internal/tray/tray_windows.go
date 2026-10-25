@@ -13,6 +13,8 @@ import (
         "unsafe"
 
         "golang.org/x/sys/windows"
+
+        "github.com/samaidev/samvnc/internal/trayicon"
 )
 
 // trayIconGUID is the stable identity of the SamVNC tray icon.
@@ -1119,6 +1121,12 @@ func (t *winTray) Run() error {
 // ============================================================
 
 // findIconFile locates tray_icon.ico.
+//
+// Search order: next to the exe, exe/assets, ~/.samvnc. When none of those
+// exist the EMBEDDED multi-resolution .ico (internal/trayicon, identical
+// artwork to the mac/linux trays) is materialized to ~/.samvnc/
+// tray_icon.ico and used — so the tray icon is always the SamVNC "V",
+// never the generic application icon.
 func (t *winTray) findIconFile() string {
         candidates := []string{}
         if exePath, err := os.Executable(); err == nil {
@@ -1128,12 +1136,23 @@ func (t *winTray) findIconFile() string {
                         filepath.Join(exeDir, "assets", "tray_icon.ico"),
                 )
         }
+        homeICO := ""
         if home, err := os.UserHomeDir(); err == nil {
-                candidates = append(candidates, filepath.Join(home, ".samvnc", "tray_icon.ico"))
+                homeICO = filepath.Join(home, ".samvnc", "tray_icon.ico")
+                candidates = append(candidates, homeICO)
         }
         for _, path := range candidates {
                 if _, err := os.Stat(path); err == nil {
                         return path
+                }
+        }
+        // Fallback: materialize the embedded .ico.
+        if homeICO != "" {
+                if err := os.MkdirAll(filepath.Dir(homeICO), 0755); err == nil {
+                        if err := os.WriteFile(homeICO, trayicon.ICO(), 0644); err == nil {
+                                trayLog("[tray] no tray_icon.ico on disk — wrote embedded icon to %s\n", homeICO)
+                                return homeICO
+                        }
                 }
         }
         return ""

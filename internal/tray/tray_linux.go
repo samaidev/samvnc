@@ -13,13 +13,8 @@
 package tray
 
 import (
-        "bytes"
         "errors"
         "fmt"
-        "image"
-        "image/color"
-        "image/draw"
-        "image/png"
         "log"
         "os"
         "os/user"
@@ -29,9 +24,8 @@ import (
 
         "github.com/godbus/dbus/v5"
         "github.com/godbus/dbus/v5/introspect"
-        "golang.org/x/image/font"
-        "golang.org/x/image/font/basicfont"
-        "golang.org/x/image/math/fixed"
+
+        "github.com/samaidev/samvnc/internal/trayicon"
 )
 
 const (
@@ -247,54 +241,34 @@ func (t *linuxTray) rebuildLocked() {
         }
 }
 
-// pixmapARGB renders the SamVNC tray icon as SNI IconPixmap data
+// pixmapARGB renders the SamVNC tray icons as SNI IconPixmap data
 // (ARGB32, big-endian, row-major).
-func pixmapARGB() (int32, int32, []byte) {
-        const S = 24
-        img := image.NewRGBA(image.Rect(0, 0, S, S))
-        bg := color.RGBA{R: 0xC9, G: 0x64, B: 0x42, A: 0xFF} // samvnc accent
-        draw.Draw(img, img.Bounds(), &image.Uniform{bg}, image.Point{}, draw.Src)
-
-        // White "S" using the builtin bitmap font, centered.
-        face := basicfont.Face7x13
-        d := &font.Drawer{
-                Dst:  img,
-                Src:  image.NewUniform(color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}),
-                Face: face,
-        }
-        w := d.MeasureString("S") >> 6
-        d.Dot = fixed.P(int(S-w)/2, (S+13)/2)
-        d.DrawString("S")
-
-        // RGBA -> ARGB32 (big-endian byte per channel).
-        out := make([]byte, 0, S*S*4)
-        for y := 0; y < S; y++ {
-                for x := 0; x < S; x++ {
-                        r, g, b, a := img.At(x, y).RGBA()
-                        out = append(out, byte(a>>8), byte(r>>8), byte(g>>8), byte(b>>8))
+//
+// Since the cross-platform icon unification, the pixmaps come from the
+// embedded artwork in internal/trayicon (the same blue rounded square +
+// white "V" as the Windows tray icon) instead of a programmatic drawing.
+// Multiple sizes are offered and the shell picks the closest match.
+func pixmapsARGB() []IconPixmap {
+        out := make([]IconPixmap, 0, len(trayicon.Sizes))
+        for _, size := range trayicon.Sizes {
+                img, err := trayicon.ScaleTo(size)
+                if err != nil {
+                        log.Printf("tray: icon scale %d: %v", size, err)
+                        continue
                 }
+                out = append(out, IconPixmap{
+                        Width:  int32(size),
+                        Height: int32(size),
+                        Data:   trayicon.ARGB(img),
+                })
         }
-        return int32(S), int32(S), out
-}
-
-// iconPNG renders the same icon as PNG (used for fallback paths/tests).
-func iconPNG() []byte {
-        w, h, data := pixmapARGB()
-        img := image.NewNRGBA(image.Rect(0, 0, int(w), int(h)))
-        i := 0
-        for y := 0; y < int(h); y++ {
-                for x := 0; x < int(w); x++ {
-                        a := data[i]
-                        r := data[i+1]
-                        g := data[i+2]
-                        b := data[i+3]
-                        img.SetNRGBA(x, y, color.NRGBA{R: r, G: g, B: b, A: a})
-                        i += 4
-                }
+        if len(out) == 0 {
+                // Should never happen (embedded assets always decode); keep one
+                // blank 24px entry so the SNI signature stays valid.
+                blank := make([]byte, 24*24*4)
+                out = append(out, IconPixmap{Width: 24, Height: 24, Data: blank})
         }
-        var buf bytes.Buffer
-        _ = png.Encode(&buf, img)
-        return buf.Bytes()
+        return out
 }
 
 // -------------------------------------------------------- dbus plumbing
@@ -403,8 +377,7 @@ func (t *linuxTray) lookupProp(iface, name string) (interface{}, bool) {
                 case "IconName":
                         return "", true
                 case "IconPixmap":
-                        w, h, data := pixmapARGB()
-                        return []IconPixmap{{Width: w, Height: h, Data: data}}, true
+                        return pixmapsARGB(), true
                 case "OverlayIconPixmap", "AttentionIconName", "AttentionIconPixmap":
                         if name == "AttentionIconName" {
                                 return "", true
@@ -412,7 +385,7 @@ func (t *linuxTray) lookupProp(iface, name string) (interface{}, bool) {
                         return []IconPixmap{}, true
                 case "ToolTip":
                         return ToolTip{
-                                IconName: "", IconPixmap: []IconPixmap{},
+                                IconName: "", IconPixmap: pixmapsARGB(),
                                 Title: "SamVNC", Description: t.tooltip,
                         }, true
                 case "Menu":

@@ -5,6 +5,8 @@ package main
 import (
         "fmt"
         "log"
+        "os"
+        "path/filepath"
         "strings"
         "syscall"
         "unsafe"
@@ -24,9 +26,11 @@ const (
         ES_AUTOHSCROLL      = 0x0080
         ES_PASSWORD         = 0x0020
         SS_LEFT             = 0x00000000
+        SS_ICON             = 0x00000003
         BS_PUSHBUTTON       = 0x00000000
         BS_DEFPUSHBUTTON    = 0x00000001
         BS_AUTOCHECKBOX     = 0x00000003
+        BS_GROUPBOX         = 0x00000007
 
         // Combo box (language selector).
         CBS_DROPDOWNLIST = 0x0003
@@ -34,13 +38,18 @@ const (
         CB_GETCURSEL     = 0x0147
         CB_SETCURSEL     = 0x014E
 
-        WM_COMMAND    = 0x0111
-        WM_CLOSE      = 0x0010
-        WM_DESTROY    = 0x0002
-        WM_GETTEXT    = 0x000D
+        WM_COMMAND   = 0x0111
+        WM_CLOSE     = 0x0010
+        WM_DESTROY   = 0x0002
+        WM_PAINT     = 0x000F
+        WM_GETTEXT   = 0x000D
         WM_GETTEXTLENGTH = 0x000E
-        WM_SETTEXT    = 0x000C
+        WM_SETTEXT   = 0x000C
+        WM_SETFONT   = 0x0030
+        WM_CTLCOLORSTATIC = 0x0138
+        WM_CTLCOLORBTN    = 0x0135
         BM_GETCHECK   = 0x00F0
+        BM_SETCHECK   = 0x00F1
 
         STM_SETICON   = 0x0170
 
@@ -49,8 +58,20 @@ const (
         SW_SHOW       = 5
         CW_USEDEFAULT = 0x80000000
 
-        DLG_FONT = "Segoe UI"
+        IMAGE_ICON         = 1
+        LR_LOADFROMFILE    = 0x00000010
+        LR_DEFAULTSIZE     = 0x00000040
+        WS_EX_CLIENTEDGE   = 0x00000200
+
+        // Brand palette (sampled from assets/tray_icon.png — the blue "V").
+        brandBlue      = uint32(0x0A3E71) // header band background
+        brandBlueSub   = int32(0xE8F0F8)  // subtitle text on the band (light blue-white)
+        textDark       = int32(0x333333)  // static label text
+        textGray       = int32(0x6A6A6A)  // hint text
 )
+
+// DLG_FONT is the base UI font family (Windows 11 style).
+const DLG_FONT = "Segoe UI"
 
 // Control IDs
 const (
@@ -68,6 +89,10 @@ const (
         idLabelAddr       = 1012
         idComboLang       = 1013
         idLabelLang       = 1014
+        idIconHeader      = 1015 // header app icon (SS_ICON)
+        idGroupConn       = 1016 // "Connection" group box
+        idGroupGeneral    = 1017 // "General" group box
+        idLabelAddrCap    = 1018 // "Current Address" caption above the URL row
 )
 
 var (
@@ -90,9 +115,35 @@ var (
         procGetWindowTextLengthW = modUser32.NewProc("GetWindowTextLengthW")
         procEnableWindow       = modUser32.NewProc("EnableWindow")
         procSetFocus           = modUser32.NewProc("SetFocus")
+        procGetDlgItem         = modUser32.NewProc("GetDlgItem")
+        procGetDlgCtrlID       = modUser32.NewProc("GetDlgCtrlID")
+        procLoadImageW         = modUser32.NewProc("LoadImageW")
+        procBeginPaint         = modUser32.NewProc("BeginPaint")
+        procEndPaint           = modUser32.NewProc("EndPaint")
+        procFillRect           = modUser32.NewProc("FillRect")
+        procSetTextColor       = modGdi32.NewProc("SetTextColor")
+        procSetBkMode          = modGdi32.NewProc("SetBkMode")
+        procSetBkColor         = modGdi32.NewProc("SetBkColor")
+        procTextOutW           = modGdi32.NewProc("TextOutW")
+        procSelectObject       = modGdi32.NewProc("SelectObject")
+        procCreateSolidBrush   = modGdi32.NewProc("CreateSolidBrush")
         procCreateFontW        = modGdi32.NewProc("CreateFontW")
         procDeleteObject       = modGdi32.NewProc("DeleteObject")
+        procGetStockObject     = modGdi32.NewProc("GetStockObject")
 )
+
+// paint struct (mirrors PAINTSTRUCT) for the header painting.
+type paintStruct struct {
+        HDC         windows.Handle
+        FErase      int32
+        RCPaint     struct{ L, T, R, B int32 }
+        FRestore    int32
+        FIncUpdate  int32
+        RGBReserved [32]byte
+}
+
+// rect is a minimal RECT for FillRect.
+type rect struct{ L, T, R, B int32 }
 
 // WNDCLASSEXW for the dialog
 type wndClassExW struct {
@@ -123,18 +174,114 @@ type settingsDialogResult struct {
 
 var dialogResult *settingsDialogResult
 var dialogHwnd windows.HWND
-var hFont windows.Handle
+var hFont windows.Handle   // body font (labels, edits, buttons)
+var hFontTitle windows.Handle // header title font
+var hFontSub windows.Handle   // header subtitle font
+var hFontSmall windows.Handle // hint / caption font
 var dialogDone bool // signals the dialog message loop to exit
 
 // These are set before opening the dialog, to show the current URL.
 var currentPublicURL string
 var currentAuthToken string
 
+// dialogFonts are created per open and deleted on close.
+func createDialogFonts() {
+        hFontTitle = createFontH(-22, "Segoe UI Semibold", 600)
+        hFontSub = createFontH(-14, DLG_FONT, 400)
+        hFont = createFontH(-14, DLG_FONT, 400)
+        hFontSmall = createFontH(-12, DLG_FONT, 400)
+}
+
+func releaseDialogFonts() {
+        for _, f := range []windows.Handle{hFontTitle, hFontSub, hFont, hFontSmall} {
+                if f != 0 {
+                        procDeleteObject.Call(uintptr(f))
+                }
+        }
+        hFontTitle, hFontSub, hFont, hFontSmall = 0, 0, 0, 0
+}
+
+// createFontH makes a GDI font. nHeight is in pixels (negative = char
+// height, which is what you want for point-accurate sizing).
+func createFontH(nHeight int, face string, weight uintptr) windows.Handle {
+        fontName, _ := windows.UTF16PtrFromString(face)
+        h, _, _ := procCreateFontW.Call(
+                uintptr(int32(nHeight)),  // nHeight (pixels)
+                uintptr(0),               // nWidth
+                uintptr(0),               // nEscapement
+                uintptr(0),               // nOrientation
+                weight,                   // fnWeight
+                uintptr(0),               // fdwItalic
+                uintptr(0),               // fdwUnderline
+                uintptr(0),               // fdwStrikeOut
+                uintptr(1),               // fdwCharSet (DEFAULT_CHARSET)
+                uintptr(0),               // fdwOutputPrecision
+                uintptr(0),               // fdwClipPrecision
+                uintptr(5),               // fdwQuality (CLEARTYPE_QUALITY)
+                uintptr(0),               // fdwPitchAndFamily
+                uintptr(unsafe.Pointer(fontName)),
+        )
+        return windows.Handle(h)
+}
+
+// paintHeader draws the brand-colored title band: filled rectangle +
+// title + subtitle. The app icon sits in an SS_ICON static on top.
+func paintHeader(hwnd windows.HWND) {
+        var ps paintStruct
+        hdc, _, _ := procBeginPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
+        if hdc == 0 {
+                return
+        }
+        defer procEndPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
+
+        // Filled header band.
+        band := rect{L: 0, T: 0, R: 560, B: 76}
+        brush, _, _ := procCreateSolidBrush.Call(uintptr(brandBlue))
+        procFillRect.Call(hdc, uintptr(unsafe.Pointer(&band)), brush)
+        procDeleteObject.Call(brush)
+
+        // Title + subtitle text.
+        procSetBkMode.Call(hdc, 1) // TRANSPARENT
+        title, _ := windows.UTF16FromString(tr("dlg.title"))
+        procSetTextColor.Call(hdc, 0xFFFFFF)
+        procSelectObject.Call(hdc, uintptr(hFontTitle))
+        procTextOutW.Call(hdc, 70, 14, uintptr(unsafe.Pointer(&title[0])), uintptr(len(title)))
+
+        sub, _ := windows.UTF16FromString(tr("dlg.subtitle"))
+        procSetTextColor.Call(hdc, uintptr(uint32(brandBlueSub)))
+        procSelectObject.Call(hdc, uintptr(hFontSmall))
+        procTextOutW.Call(hdc, 70, 44, uintptr(unsafe.Pointer(&sub[0])), uintptr(len(sub)))
+}
+
 // settingsDlgProc is the WindowProc for the settings dialog
 func settingsDlgProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) uintptr {
         switch msg {
         case 0x0001: // WM_CREATE
                 return 0
+
+        case WM_PAINT:
+                paintHeader(hwnd)
+                return 0
+
+        case WM_CTLCOLORSTATIC:
+                // Statics + group boxes: white content background, colored text.
+                // The hint is lighter gray; everything else near-black.
+                hdc := uintptr(wParam)
+                child := windows.HWND(lParam)
+                id, _, _ := procGetDlgCtrlID.Call(uintptr(child))
+                procSetBkMode.Call(hdc, 1) // TRANSPARENT
+                if id == idLabelHint || id == idLabelAddrCap {
+                        procSetTextColor.Call(hdc, uintptr(textGray))
+                } else {
+                        procSetTextColor.Call(hdc, uintptr(textDark))
+                }
+                white, _, _ := procGetStockObject.Call(0) // WHITE_BRUSH = 0
+                return uintptr(white)
+
+        case WM_CTLCOLORBTN:
+                // Checkbox background on the white dialog body.
+                white, _, _ := procGetStockObject.Call(0)
+                return uintptr(white)
 
         case WM_COMMAND:
                 cmdID := uint32(wParam) & 0xFFFF
@@ -213,8 +360,6 @@ func settingsDlgProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) uint
 }
 
 func getDlgItem(parentHwnd windows.HWND, id int) windows.HWND {
-        // Find child window by ID - use GetDlgItem
-        procGetDlgItem := modUser32.NewProc("GetDlgItem")
         h, _, _ := procGetDlgItem.Call(uintptr(parentHwnd), uintptr(id))
         return windows.HWND(h)
 }
@@ -236,32 +381,15 @@ func setWindowText(parentHwnd windows.HWND, controlID int, text string) {
         procSetWindowTextW.Call(uintptr(hwnd), uintptr(unsafe.Pointer(textUTF16)))
 }
 
-func createFont() windows.Handle {
-        fontName, _ := windows.UTF16PtrFromString("Segoe UI")
-        h, _, _ := procCreateFontW.Call(
-                uintptr(16),              // nHeight
-                uintptr(0),               // nWidth
-                uintptr(0),               // nEscapement
-                uintptr(0),               // nOrientation
-                uintptr(400),             // fnWeight (FW_NORMAL)
-                uintptr(0),               // fdwItalic
-                uintptr(0),               // fdwUnderline
-                uintptr(0),               // fdwStrikeOut
-                uintptr(1),               // fdwCharSet (DEFAULT_CHARSET)
-                uintptr(0),               // fdwOutputPrecision
-                uintptr(0),               // fdwClipPrecision
-                uintptr(5),               // fdwQuality (CLEARTYPE_QUALITY)
-                uintptr(0),               // fdwPitchAndFamily
-                uintptr(unsafe.Pointer(fontName)), // lpszFace
-        )
-        return windows.Handle(h)
+func createControl(class string, text string, style uintptr, id int, x, y, w, h int, parentHwnd windows.HWND) windows.HWND {
+        return createControlEx(class, text, 0, style, id, x, y, w, h, parentHwnd)
 }
 
-func createControl(class string, text string, style uintptr, id int, x, y, w, h int, parentHwnd windows.HWND) windows.HWND {
+func createControlEx(class string, text string, exStyle uintptr, style uintptr, id int, x, y, w, h int, parentHwnd windows.HWND) windows.HWND {
         classNameUTF16, _ := windows.UTF16PtrFromString(class)
         textUTF16, _ := windows.UTF16PtrFromString(text)
         hwnd, _, _ := procCreateWindowExW.Call(
-                0,
+                exStyle,
                 uintptr(unsafe.Pointer(classNameUTF16)),
                 uintptr(unsafe.Pointer(textUTF16)),
                 style,
@@ -273,9 +401,31 @@ func createControl(class string, text string, style uintptr, id int, x, y, w, h 
         hwndResult := windows.HWND(hwnd)
         // Set font
         if hFont != 0 {
-                procSendMessageW.Call(hwnd, 0x0030, uintptr(hFont), 0) // WM_SETFONT
+                procSendMessageW.Call(hwnd, WM_SETFONT, uintptr(hFont), 0)
         }
         return hwndResult
+}
+
+// findDialogIconFile locates the tray icon for the header. Same search
+// order as the tray's findIconFile: exe dir, exe/assets, ~/.samvnc.
+func findDialogIconFile() string {
+        candidates := []string{}
+        if exePath, err := os.Executable(); err == nil {
+                dir := filepath.Dir(exePath)
+                candidates = append(candidates,
+                        filepath.Join(dir, "tray_icon.ico"),
+                        filepath.Join(dir, "assets", "tray_icon.ico"),
+                )
+        }
+        if home, err := os.UserHomeDir(); err == nil {
+                candidates = append(candidates, filepath.Join(home, ".samvnc", "tray_icon.ico"))
+        }
+        for _, p := range candidates {
+                if _, err := os.Stat(p); err == nil {
+                        return p
+                }
+        }
+        return ""
 }
 
 // openSettingsDialog opens a native Windows GUI settings dialog.
@@ -305,15 +455,13 @@ func openSettingsDialog(s *settings.Settings, publicURL, authToken string) (newS
         currentPublicURL = publicURL
         currentAuthToken = authToken
 
-        // Create font
-        hFont = createFont()
-        defer func() {
-                if hFont != 0 {
-                        procDeleteObject.Call(uintptr(hFont))
-                }
-        }()
+        // Create fonts (title / subtitle / body / hint).
+        createDialogFonts()
+        defer releaseDialogFonts()
 
-        // Register window class
+        // Register window class. White background: the header band is painted
+        // over it, and statics/group boxes blend into the clean white body.
+        whiteBrush, _, _ := procGetStockObject.Call(0) // WHITE_BRUSH
         classNameUTF16, _ := windows.UTF16PtrFromString("SamVNCSettingsDlg")
         wproc := syscall.NewCallback(settingsDlgProc)
 
@@ -321,7 +469,7 @@ func openSettingsDialog(s *settings.Settings, publicURL, authToken string) (newS
                 Size:        uint32(unsafe.Sizeof(wndClassExW{})),
                 LpfnWndProc: wproc,
                 LpszClassName: classNameUTF16,
-                HbrBackground: windows.Handle(15), // COLOR_BTNFACE+1 = 15
+                HbrBackground: windows.Handle(whiteBrush),
         }
 
         procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
@@ -337,7 +485,7 @@ func openSettingsDialog(s *settings.Settings, publicURL, authToken string) (newS
                 uintptr(unsafe.Pointer(titleUTF16)),
                 uintptr(WS_OVERLAPPEDWINDOW & ^uintptr(0x00040000) & ^uintptr(0x00010000)), // OVERLAPPEDWINDOW without maximizebox and sizebox (fixed dialog)
                 uintptr(CW_USEDEFAULT), uintptr(CW_USEDEFAULT),
-                uintptr(540), uintptr(370), // width, height
+                uintptr(576), uintptr(500+40), // width, height (incl. non-client)
                 0, 0, 0, 0,
         )
         if hwnd == 0 {
@@ -347,49 +495,71 @@ func openSettingsDialog(s *settings.Settings, publicURL, authToken string) (newS
         dialogHwnd = windows.HWND(hwnd)
         log.Printf("[settings] dialog hwnd=0x%X", uintptr(hwnd))
 
-        // Create controls
-        const margin = 20
-        const labelW = 130
-        const editW = 310
-        const editH = 24
-        const lineH = 35
+        // ---- Layout constants (client coordinates) ----
+        const (
+                margin   = 20
+                groupX   = 16
+                groupW   = 528
+                labelX   = 36
+                labelW   = 110
+                editX    = 156
+                editW    = 366
+                editH    = 26
+                btnH     = 30
+        )
 
-        y := 20
-
-        // Agent Key label
-        createControl("STATIC", tr("dlg.key"), uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelAgentKey, margin, y+3, labelW, 20, dialogHwnd)
-        // Agent Key edit
-        createControl("EDIT", s.AgentToken, uintptr(WS_CHILD|WS_VISIBLE|WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL), idEditAgentKey, margin+labelW+10, y, editW, editH, dialogHwnd)
-        y += lineH
-
-        // Auth token label
-        createControl("STATIC", tr("dlg.token"), uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelAuthToken, margin, y+3, labelW, 20, dialogHwnd)
-        // Auth token edit
-        createControl("EDIT", s.AuthToken, uintptr(WS_CHILD|WS_VISIBLE|WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL), idEditAuthToken, margin+labelW+10, y, editW, editH, dialogHwnd)
-        y += lineH
-
-        // Auto-start checkbox
-        checkText := tr("dlg.autostart")
-        checked := uint32(0)
-        if s.AutoStart {
-                checked = 1
+        // Header app icon (SS_ICON static over the painted brand band).
+        iconStatic := createControlEx("STATIC", "", 0,
+                uintptr(WS_CHILD|WS_VISIBLE|SS_ICON), idIconHeader,
+                18, 18, 40, 40, dialogHwnd)
+        if iconPath := findDialogIconFile(); iconPath != "" {
+                ip, _ := windows.UTF16PtrFromString(iconPath)
+                hIcon, _, callErr := procLoadImageW.Call(
+                        0, uintptr(unsafe.Pointer(ip)),
+                        uintptr(IMAGE_ICON), 0, 0,
+                        uintptr(LR_LOADFROMFILE|LR_DEFAULTSIZE),
+                )
+                if hIcon != 0 {
+                        procSendMessageW.Call(uintptr(iconStatic), uintptr(STM_SETICON), hIcon, 0)
+                } else {
+                        log.Printf("[settings] header icon LoadImage failed: %v", callErr)
+                }
         }
-        createControl("BUTTON", checkText, uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX), idCheckAutoStart, margin+labelW+10, y, editW, editH, dialogHwnd)
-        if checked == 1 {
-                hwndCheck := getDlgItem(dialogHwnd, idCheckAutoStart)
-                procSendMessageW.Call(uintptr(hwndCheck), 0x00F1, 1, 0) // BM_SETCHECK = BST_CHECKED
-        }
-        y += lineH
+
+        // ---- Connection group ----
+        createControl("BUTTON", tr("dlg.groupConn"),
+                uintptr(WS_CHILD|WS_VISIBLE|BS_GROUPBOX), idGroupConn,
+                groupX, 88, groupW, 122, dialogHwnd)
+
+        // Agent Key label + edit
+        createControl("STATIC", tr("dlg.key"), uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelAgentKey,
+                labelX, 118, labelW, 20, dialogHwnd)
+        createControlEx("EDIT", s.AgentToken, uintptr(WS_EX_CLIENTEDGE),
+                uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL), idEditAgentKey,
+                editX, 114, editW, editH, dialogHwnd)
+
+        // Auth token label + edit
+        createControl("STATIC", tr("dlg.token"), uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelAuthToken,
+                labelX, 156, labelW, 20, dialogHwnd)
+        createControlEx("EDIT", s.AuthToken, uintptr(WS_EX_CLIENTEDGE),
+                uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL), idEditAuthToken,
+                editX, 152, editW, editH, dialogHwnd)
+
+        // ---- General group ----
+        createControl("BUTTON", tr("dlg.groupGeneral"),
+                uintptr(WS_CHILD|WS_VISIBLE|BS_GROUPBOX), idGroupGeneral,
+                groupX, 220, groupW, 102, dialogHwnd)
 
         // Language selector (Auto / English / 中文). The item texts are
         // found by INDEX on OK (0/1/2), never by text.
-        createControl("STATIC", tr("dlg.language"), uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelLang, margin, y+5, labelW, 20, dialogHwnd)
+        createControl("STATIC", tr("dlg.language"), uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelLang,
+                labelX, 248, labelW, 20, dialogHwnd)
         hwndCombo, _, _ := procCreateWindowExW.Call(
                 0,
                 uintptr(unsafe.Pointer(comboClassName)),
                 0,
                 uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|CBS_DROPDOWNLIST),
-                uintptr(margin+labelW+10), uintptr(y), uintptr(200), uintptr(200), // height includes the dropdown list
+                uintptr(editX), uintptr(244), uintptr(220), uintptr(200), // height includes the dropdown list
                 uintptr(dialogHwnd),
                 uintptr(idComboLang),
                 0, 0,
@@ -408,18 +578,31 @@ func openSettingsDialog(s *settings.Settings, publicURL, authToken string) (newS
         }
         procSendMessageW.Call(hwndCombo, uintptr(CB_SETCURSEL), initSel, 0)
         if hFont != 0 {
-                procSendMessageW.Call(hwndCombo, 0x0030, uintptr(hFont), 0) // WM_SETFONT
+                procSendMessageW.Call(hwndCombo, WM_SETFONT, uintptr(hFont), 0)
         }
-        y += lineH
 
-        // Hint text
-        hintText := tr("dlg.hint")
-        createControl("STATIC", hintText, uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelHint, margin, y, labelW+editW+10, 40, dialogHwnd)
-        y += 50
+        // Auto-start checkbox
+        checkText := tr("dlg.autostart")
+        checked := uint32(0)
+        if s.AutoStart {
+                checked = 1
+        }
+        createControl("BUTTON", checkText, uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX), idCheckAutoStart,
+                editX, 282, editW, 24, dialogHwnd)
+        if checked == 1 {
+                hwndCheck := getDlgItem(dialogHwnd, idCheckAutoStart)
+                procSendMessageW.Call(uintptr(hwndCheck), BM_SETCHECK, 1, 0)
+        }
 
-        // Current address display + Copy button
-        btnW := 100
-        btnH := 30
+        // ---- Hint text ----
+        createControl("STATIC", tr("dlg.hint"), uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelHint,
+                margin, 334, groupW, 46, dialogHwnd)
+
+        // ---- Current address row ----
+        createControl("STATIC", tr("dlg.addrLabel"), uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelAddrCap,
+                margin, 388, 200, 18, dialogHwnd)
+
+        btnW := 118
         addrLabel := tr("dlg.addrNone")
         if publicURL != "" {
                 fullURL := publicURL
@@ -428,19 +611,23 @@ func openSettingsDialog(s *settings.Settings, publicURL, authToken string) (newS
                 }
                 addrLabel = fullURL
         }
-        createControl("STATIC", addrLabel, uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelAddr, margin, y, labelW+editW+10-btnW-10, editH, dialogHwnd)
-        createControl("BUTTON", tr("dlg.btnCopy"), uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON), idBtnCopyAddr, margin+labelW+editW+10-btnW, y-2, btnW, btnH, dialogHwnd)
+        createControlEx("STATIC", addrLabel, uintptr(WS_EX_CLIENTEDGE),
+                uintptr(WS_CHILD|WS_VISIBLE|SS_LEFT), idLabelAddr,
+                margin, 408, groupW-btnW-10, editH, dialogHwnd)
+        createControl("BUTTON", tr("dlg.btnCopy"), uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON), idBtnCopyAddr,
+                groupX+groupW-btnW, 406, btnW, btnH+2, dialogHwnd)
         if publicURL == "" {
                 // Disable copy button if no URL
                 hwndCopy := getDlgItem(dialogHwnd, idBtnCopyAddr)
                 procEnableWindow.Call(uintptr(hwndCopy), 0)
         }
-        y += lineH
 
-        // OK button
-        createControl("BUTTON", tr("dlg.ok"), uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON), idBtnOK, margin+labelW+10+editW-btnW*2-10, y, btnW, btnH, dialogHwnd)
-        // Cancel button
-        createControl("BUTTON", tr("dlg.cancel"), uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON), idBtnCancel, margin+labelW+10+editW-btnW, y, btnW, btnH, dialogHwnd)
+        // ---- OK / Cancel (bottom-right, standard dialog layout) ----
+        okW, cancelW := 98, 98
+        createControl("BUTTON", tr("dlg.ok"), uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON), idBtnOK,
+                groupX+groupW-okW-cancelW-10, 444, okW, btnH, dialogHwnd)
+        createControl("BUTTON", tr("dlg.cancel"), uintptr(WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON), idBtnCancel,
+                groupX+groupW-cancelW, 444, cancelW, btnH, dialogHwnd)
 
         // Show window and put the caret into the key field so the user can
         // edit immediately without an extra click.

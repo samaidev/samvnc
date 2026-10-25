@@ -196,6 +196,8 @@ func (a *TrayApp) onMenuItem(itemID string) {
                 a.openSettings()
         case "copy_address":
                 a.copyAddress()
+        case "screenshot":
+                go a.takeScreenshot()
         case "exit":
                 go func() {
                         a.stopServer()
@@ -298,6 +300,12 @@ func (a *TrayApp) startServer() {
                 for scanner.Scan() {
                         line := scanner.Text()
                         log.Printf("[server] %s", line)
+                        // Remember the LOCAL UI address (used by the tray
+                        // screenshot operation — fastest endpoint, works
+                        // even before the tunnel is up).
+                        if m := localUIRE.FindStringSubmatch(line); m != nil {
+                                localURL = m[1]
+                        }
                         // Look for the public URL line (case-insensitive).
                         lower := strings.ToLower(line)
                         if strings.Contains(lower, "public url") ||
@@ -615,6 +623,16 @@ func (a *TrayApp) refreshMenu() {
                 ID:       "copy_address",
                 Label:    tr("menu.copy"),
                 Disabled: !hasURL,
+        })
+
+        // Screenshot — one-click tray operation: grabs /api/screenshot from
+        // the running server, saves a timestamped PNG under ~/Pictures/SamVNC
+        // and opens it. Enabled whenever the server is running (works via the
+        // local endpoint even before the public URL is known).
+        items = append(items, tray.MenuItem{
+                ID:       "screenshot",
+                Label:    tr("menu.screenshot"),
+                Disabled: state != stateRunning,
         })
 
         items = append(items, tray.MenuItem{Separator: true})

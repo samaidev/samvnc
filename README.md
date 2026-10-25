@@ -250,7 +250,7 @@ provides a context menu with:
 - **Auto-start on boot** — toggle (mutually exclusive); registers the tray
   binary for boot-time startup via Windows Registry (Win), LaunchAgent (macOS),
   or `.desktop` autostart file (Linux)
-- **Settings...** — opens `~/.samvnc/settings.json` in the default text editor
+- **Settings...** — native settings dialog (graphical on all three platforms)
   where you can set:
   - `agent_token` — your aitun.cc agent token (`aitagt_...`) for a permanent
     subdomain. If empty, the built-in default is used (ephemeral subdomain).
@@ -258,11 +258,54 @@ provides a context menu with:
     one is auto-generated.
   - `auth_token` — the client auth token. Auto-generated on first run.
   - `auto_start` — whether to start on boot.
+  - `language` — UI language (Auto / English / 中文), applied immediately.
 - **Copy Address** — copies the public URL with `?token=xxx` to the clipboard,
   ready to paste into any browser
+- **Screenshot** — one-click tray screenshot: grabs `/api/screenshot` from the
+  running server, saves `~/Pictures/SamVNC/samvnc-YYYYMMDD-HHMMSS.png` and
+  opens it with the platform image viewer. No curl, no terminal.
 - **Exit** — stops the server and quits
 
-### Settings file
+The tray icon is the SAME artwork on every platform (blue rounded square +
+white "V", from `assets/tray_icon.png`): Windows loads `tray_icon.ico`
+(embedded fallback), macOS renders the embedded PNG as an NSStatusItem
+image, and Linux exports multi-size pixmaps over the SNI D-Bus protocol —
+native trays on Windows, macOS and Linux.
+
+## Remote Desktop in 30 Seconds
+
+Three steps after install — browser-accessible remote desktop, screenshots
+right from the tray.
+
+**1. Launch the tray**
+
+Run `samvnc-tray` (on Windows, double-click the tray exe from the zip).
+The SamVNC icon appears in the system tray / menu bar and the server
+starts automatically:
+
+```
+samvnc-tray
+```
+
+Empty key = free proxy-address mode (`https://aitun.cc/<code>`, ~24h);
+with an aitun key (Settings dialog) it becomes a permanent subdomain.
+
+**2. Copy the address, open in a browser**
+
+Tray menu → **Copy Address**, paste into any browser — the desktop is
+right there.
+
+**3. Screenshot from the tray**
+
+Tray menu → **Screenshot**: the current desktop is saved as a timestamped
+PNG under `~/Pictures/SamVNC/` and opened automatically. Programmatic
+clients can still use the same endpoint:
+
+```bash
+curl https://samvnc-myhost-abc123.t.aitun.cc/api/screenshot -o screen.png
+```
+
+## Settings file
 
 Located at `~/.samvnc/settings.json`:
 
