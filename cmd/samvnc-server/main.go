@@ -293,6 +293,11 @@ func startTunnel(cfg config.Config, port int, srv *server.Server, agentToken str
                 LocalPort: port,
                 TCPOnly:   cfg.Tunnel.TCPOnly,
                 Subdomain: cfg.Tunnel.Subdomain,
+                // Isolate the client's persisted identity in our data dir:
+                // sharing ~/.aitun with the user's other aitun clients makes
+                // the relay treat them as ONE client and the tunnels kick
+                // each other out ("Connection replaced by newer connection").
+                Home: filepath.Join(cfg.DataDir, "aitun-home"),
                 Logf: func(format string, args ...any) {
                         log.Printf("[aitun] "+format, args...)
                 },
