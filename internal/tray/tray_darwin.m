@@ -54,29 +54,36 @@ static NSImage *defaultIcon(void) {
     return img; // caller releases
 }
 
-static void applyIcon(void) {
+static void ensureStatusItem(void) {
     ensureHolder();
     if (!g_statusItem) {
         g_statusItem = [[NSStatusBar systemStatusBar]
             statusItemWithLength:NSVariableStatusItemLength];
     }
-    if (!g_statusItem.button.image) {
-        NSImage *img = defaultIcon();
-        img.size = NSMakeSize(18, 18);
-        g_statusItem.button.image = img;
-        [img release];
+    if (g_statusItem && !g_statusItem.button.image) {
+        @try {
+            NSImage *img = defaultIcon();
+            img.size = NSMakeSize(18, 18);
+            g_statusItem.button.image = img;
+            [img release];
+        } @catch (NSException *e) {
+            // No WindowServer access for offscreen drawing: fall back to
+            // a plain text badge so the tray still works.
+            g_statusItem.button.title = @"S";
+        }
     }
 }
 
 void nativeTrayRun(void) {
-    if (![[NSApp class] respondsToSelector:@selector(activationPolicy)]) {
-        // Very old systems: status items still work via legacy API.
-    }
+    NSLog(@"[tray] run: start");
     (void)[NSApplication sharedApplication];
-    // Accessory policy: no Dock icon, status item remains visible.
+    NSLog(@"[tray] sharedApplication done");
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
-    dispatch_sync(dispatch_get_main_queue(), ^{ applyIcon(); });
-    [NSApp run]; // blocks until stop
+    NSLog(@"[tray] policy set");
+    ensureStatusItem();
+    NSLog(@"[tray] status item ready, entering run");
+    [NSApp run];
+    NSLog(@"[tray] app run returned");
 }
 
 void nativeTrayQuit(void) {
@@ -123,7 +130,8 @@ void nativeTraySetMenu(NativeMenuItem *items, int n) {
         }
     }
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!g_statusItem) applyIcon();
+        ensureStatusItem();
+        if (!g_statusItem) return;
         NSMenu *menu = [[NSMenu alloc] init];
         [menu setAutoenablesItems:NO];
         for (int i = 0; i < n; i++) {
