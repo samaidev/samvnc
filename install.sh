@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# SamVNC official installer for Linux/macOS — GitHub Releases based
+# SamVNC official installer for Linux/macOS — public mirror based
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/samaidev/samvnc/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/samaidev/samvnc/main/install.sh | bash -s -- --version v1.4.1
+#   curl -fsSL https://samai.cc/samvnc/install.sh | bash
+#   curl -fsSL https://samai.cc/samvnc/install.sh | bash -s -- --version v1.4.1
 #
 # Downloads the samvnc-server AND samvnc-tray binaries for the current
-# platform from the samaidev/samvnc GitHub Releases and installs them to
-# /usr/local/bin (with root) or ~/.local/bin (without root).
+# platform and installs them to /usr/local/bin (with root) or
+# ~/.local/bin (without root).
+#
+# Default source is the PUBLIC mirror on samai.cc (the GitHub repo is
+# private — raw.githubusercontent and release downloads 404 for
+# anonymous users). --version <tag> pulls from GitHub Releases instead
+# and requires GitHub access to that repo.
 #
 # `samvnc-tray` is the recommended start command: it brings up the native
 # system tray (one unified icon on Windows/macOS/Linux) and launches the
 # server automatically. On headless machines (SSH, no desktop) the tray
 # binary detects the missing GUI and falls back to server-only mode, so
 # the same command works everywhere.
-#
-# Package downloads are hosted on GitHub Releases:
-#   https://github.com/samaidev/samvnc/releases
 
 set -euo pipefail
 
@@ -25,6 +27,11 @@ BIN_NAME="samvnc-server"
 TRAY_NAME="samvnc-tray"
 INSTALL_DIR=""
 REQUESTED_VERSION=""
+
+# Public mirror (works for EVERYONE — the GitHub repo is private, so
+# raw.githubusercontent and release downloads 404 for anonymous users).
+# wf3 mirrors every release's binaries here, flat, latest release only.
+MIRROR="https://samai.cc/samvnc/downloads"
 
 # Fallback: the most recent release known to ship every platform binary.
 # If the latest release does not include your platform, we retry from here
@@ -94,10 +101,12 @@ fetch() { # fetch <url> <dest>
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-try_download() { # try_download <remote-file> <tag-or-latest> <dest> ; returns 0 on success
+try_download() { # try_download <remote-file> <tag-or-latest-or-mirror> <dest> ; returns 0 on success
     local file="$1" tag="$2" dest="$3"
     local url
-    if [[ "$tag" == "latest" ]]; then
+    if [[ "$tag" == "mirror" ]]; then
+        url="${MIRROR}/${file}"
+    elif [[ "$tag" == "latest" ]]; then
         url="https://github.com/${REPO}/releases/latest/download/${file}"
     else
         url="https://github.com/${REPO}/releases/download/${tag}/${file}"
@@ -125,16 +134,18 @@ install_asset() { # install_asset <remote-file> <dest-name> <required:yes/no>
         }
         tag="$REQUESTED_VERSION"
     else
-        if try_download "$file" latest "$dest"; then
+        if try_download "$file" mirror "$dest"; then
+            tag="mirror (latest release)"
+        elif try_download "$file" latest "$dest"; then
             tag="latest"
         elif try_download "$file" "$FALLBACK_TAG" "$dest"; then
             tag="$FALLBACK_TAG"
-            echo "NOTE: latest release does not ship ${file}." >&2
+            echo "NOTE: mirror and latest release do not ship ${file}." >&2
             echo "      Fell back to ${FALLBACK_TAG}." >&2
         else
             if [[ "$required" == "yes" ]]; then
-                echo "ERROR: could not download ${file} from GitHub Releases." >&2
-                echo "Please grab it manually from: https://github.com/${REPO}/releases" >&2
+                echo "ERROR: could not download ${file} from ${MIRROR} or GitHub Releases." >&2
+                echo "Please grab it manually from: ${MIRROR}" >&2
                 exit 1
             fi
             return 1
