@@ -83,21 +83,40 @@ func settingsDialogDarwin(s *settings.Settings, publicURL, authToken string,
 
         // Access Token in its own dialog (osascript shows one text field per
         // dialog unless a full AppleScript app is built; a separate compact
-        // dialog is clearer than losing the token entirely).
+        // dialog is clearer than losing the token entirely). The dialog
+        // carries an explicit Regenerate button: pressing it creates a
+        // fresh token, copies it to the clipboard and shows it once.
         tokenMsg := tr("dlg.token") + "\n(" + tr("dlg.tokenHint") + ")"
         tokenOut, tokenErr := runOsaActivated("display dialog " + appleQuote(tokenMsg) +
                 " default answer " + appleQuote(s.AuthToken) +
                 " with title " + appleQuote(tr("dlg.title")) +
                 " buttons {" + appleQuote(tr("dlg.cancel")) + "," +
+                appleQuote(tr("dlg.btnRegen")) + "," +
                 appleQuote(tr("dlg.ok")) + "}" +
                 " default button " + appleQuote(tr("dlg.ok")) +
                 " cancel button " + appleQuote(tr("dlg.cancel")))
         if tokenErr == nil {
-                token, _ := parseOsaDialog(tokenOut)
-                ns.AuthToken = token
+                token, tokenBtn := parseOsaDialog(tokenOut)
+                if strings.Contains(tokenBtn, "Regenerate") || strings.Contains(tokenBtn, "重新生成") {
+                        // Explicit Regenerate: new token + clipboard copy.
+                        ns.AuthToken = settings.GenerateToken()
+                        _, _ = runOsa("set the clipboard to " + appleQuote(ns.AuthToken))
+                        _, _ = runOsaActivated("display dialog " +
+                                appleQuote(tr("dlg.regenDone")+"\n"+ns.AuthToken) +
+                                " with title " + appleQuote(tr("dlg.title")) +
+                                " buttons {" + appleQuote(tr("dlg.ok")) + "}" +
+                                " default button " + appleQuote(tr("dlg.ok")))
+                } else {
+                        ns.AuthToken = token
+                }
         } else {
                 // Cancelled the token step — cancel the whole settings flow.
                 return s, false, false
+        }
+        // An emptied token field also means "rotate it" — same semantics as
+        // the Windows dialog and the tray's applySettings().
+        if ns.AuthToken == "" {
+                ns.AuthToken = settings.GenerateToken()
         }
 
         // ---- 2. Copy Address (offer + actually copy) ----
@@ -254,19 +273,65 @@ func runZenity(zenity string, args ...string) (string, error) {
         return out, err
 }
 
+// runZenityEntry shows a `zenity --entry` dialog with the field prefilled
+// (unlike --forms, --entry supports prefill on every zenity version).
+// extraButton (when non-empty) adds a custom button — pressing it exits 0
+// with the button label printed to stdout or stderr depending on the
+// zenity build; both streams are captured and reported via the returned
+// button value. A plain OK returns the (possibly emptied) field text.
+// Cancel or window-close returns an error (exit 1).
+func runZenityEntry(zenity, text, prefill, extraButton string) (entry, button string, err error) {
+        args := []string{"--entry",
+                "--title", tr("dlg.title"),
+                "--text", text,
+        }
+        if prefill != "" {
+                args = append(args, "--entry-text", prefill)
+        }
+        if extraButton != "" {
+                args = append(args, "--extra-button", extraButton)
+        }
+        cmd := exec.Command(zenity, args...)
+        var outBuf, errBuf bytes.Buffer
+        cmd.Stdout = &outBuf
+        cmd.Stderr = &errBuf
+        if err := cmd.Run(); err != nil {
+                return "", "", err // exit 1 = cancelled, 5 = timeout
+        }
+        out := strings.TrimRight(outBuf.String(), "\n")
+        errOut := strings.TrimSpace(strings.TrimRight(errBuf.String(), "\n"))
+        if extraButton != "" {
+                firstLine := out
+                if i := strings.IndexByte(out, '\n'); i >= 0 {
+                        firstLine = out[:i]
+                }
+                if errOut == extraButton || out == extraButton || strings.TrimSpace(firstLine) == extraButton {
+                        return "", extraButton, nil
+                }
+        }
+        return strings.TrimSpace(out), "", nil
+}
+
 // settingsDialogZenity shows zenity dialogs on Linux; no-op without zenity.
 //
 // NOTE ON ZENITY 4.x (GTK4, Ubuntu 26.04+): `--forms` no longer accepts
 // `--add-checkbox` — it exits 255 with "option not available", which made
 // the ENTIRE settings dialog silently fail on new distros (nothing at all
-// appeared when the user clicked Settings). The form therefore collects
-// only the two text fields; auto-start moved to a --question step and the
-// copy-address button became a pre-filled --entry whose text is selectable
+// appeared when the user clicked Settings).
+//
+// NOTE ON PREFILL: `--forms` also CANNOT prefill its entry fields, so
+// every open showed EMPTY key and token fields — the auto-generated token
+// looked missing, and clicking OK silently WIPED the configured key. The
+// connection step therefore uses prefilled `--entry` dialogs (--entry-text
+// works on every zenity version), one per field, with an extra
+// Regenerate button on the token dialog (--extra-button).
+//
+// The copy-address button is a pre-filled --entry whose text is selectable
 // (Ctrl+A, Ctrl+C) in every zenity version — stock GNOME Wayland has no
 // clipboard tool, so a selectable field is the reliable way to copy.
 //
 // Flow, mirroring the Windows settings page sections:
-//  1. Connection form: Aitun.cc key + Access Token
+//  1. Connection entries: Aitun.cc key, then Access Token (+ Regenerate)
 //  2. Copy Address: selectable entry pre-filled with URL (+ auto-copy on OK)
 //  3. Auto-start: question dialog — OK = enable, Cancel = disable
 //  4. Language: radiolist (Auto / 中文 / English)
@@ -279,26 +344,38 @@ func settingsDialogZenity(s *settings.Settings, publicURL string,
 
         ns := *s
 
-        // ---- 1. Connection form (key + token only — see zenity 4.x note) ----
-        args := []string{"--forms", "--title", tr("dlg.title"),
-                "--text", tr("dlg.hint"),
-                "--add-entry", tr("dlg.key"),
-                "--add-entry", tr("dlg.token"),
+        // ---- 1a. Aitun.cc key (prefilled; empty = free proxy mode) ----
+        keyText := tr("dlg.key") + "\n\n" + tr("dlg.hint")
+        if publicURL != "" {
+                keyText += "\n\n" + tr("dlg.addrLabel") + ": " + publicURL
         }
-        outRaw, err := runZenity(zenity, args...)
-        if err != nil {
-                return s, false, false // dismissed (exit 1) or failed — keep originals
+        keyOut, _, keyErr := runZenityEntry(zenity, keyText, s.AgentToken, "")
+        if keyErr != nil {
+                return s, false, false // dismissed (exit 1) — keep originals
         }
-        // Output is field-separated by "|" and lines by "\n".
-        fields := strings.Split(outRaw, "\n")
-        if len(fields) > 0 {
-                parts := strings.Split(fields[0], "|")
-                if len(parts) > 0 {
-                        ns.AgentToken = strings.TrimSpace(parts[0])
+        ns.AgentToken = keyOut
+
+        // ---- 1b. Access token (prefilled, extra Regenerate button) ----
+        for {
+                tokOut, tokBtn, tokErr := runZenityEntry(zenity,
+                        tr("dlg.token")+"\n("+tr("dlg.tokenHint")+")",
+                        ns.AuthToken, tr("dlg.btnRegen"))
+                if tokErr != nil {
+                        return s, false, false // dismissed — keep originals
                 }
-                if len(parts) > 1 {
-                        ns.AuthToken = strings.TrimSpace(parts[1])
+                if tokBtn != "" {
+                        // Regenerate pressed: fresh token, shown in the
+                        // field again so the user can see/copy it.
+                        ns.AuthToken = settings.GenerateToken()
+                        continue
                 }
+                ns.AuthToken = tokOut
+                break
+        }
+        // An emptied token field means "rotate it" — same semantics as the
+        // Windows dialog and the tray's applySettings().
+        if ns.AuthToken == "" {
+                ns.AuthToken = settings.GenerateToken()
         }
 
         // ---- 2. Copy Address: selectable, pre-filled entry + auto-copy ----

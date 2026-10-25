@@ -80,7 +80,10 @@ var msgMap = map[string]i18nPair{
         "dlg.addrLabel":    {"Current Address", "当前地址"},
         "dlg.key":       {"Aitun.cc Key:", "Aitun.cc 密钥："},
         "dlg.token":     {"Access Token:", "访问令牌："},
-        "dlg.tokenHint": {"clear + OK rotates the token", "清空并确定后将生成新令牌"},
+        "dlg.tokenHint": {"click Regenerate (or clear + OK) for a new token",
+                "点击「重新生成」，或清空后确定，都会生成新令牌"},
+        "dlg.btnRegen":  {"Regenerate", "重新生成"},
+        "dlg.regenDone": {"New token generated (copied to clipboard):", "已生成新令牌（已复制到剪贴板）："},
         "dlg.language":  {"Language:", "语言："},
         "dlg.autostart": {" Start SamVNC on system boot", " 开机自动启动 SamVNC"},
         "dlg.autostartQ": {"Start SamVNC automatically on system boot?",
@@ -88,11 +91,11 @@ var msgMap = map[string]i18nPair{
         "dlg.hint": {"Enter your aitun.cc key to bind a permanent subdomain. " +
                 "Leave it EMPTY to use the free aitun.cc proxy-address mode " +
                 "(random https://aitun.cc/<code> URL, valid ~24h).\n" +
-                "Clearing the Access Token rotates it: a new token is generated " +
-                "and old share URLs stop working.",
+                "The access token is generated automatically on first run. " +
+                "Click Regenerate to rotate it: old share URLs stop working.",
                 "填写 aitun.cc 密钥可绑定固定子域名；留空则使用 aitun.cc 免费代理地址模式" +
                         "（随机 https://aitun.cc/<code> 地址，约 24 小时有效）。\n" +
-                        "清空访问令牌并确定后将生成新令牌，旧的分享链接随即失效。"},
+                        "访问令牌在首次运行时自动生成；点击「重新生成」可更换令牌，旧的分享链接随即失效。"},
         "dlg.addrNone": {"Address: (not available)", "地址：（暂无）"},
         "dlg.btnCopy":  {"Copy Address", "复制地址"},
         "dlg.copied":   {"✓ Copied: ", "✓ 已复制："},
