@@ -331,6 +331,12 @@ func settingsDlgProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) uint
                         return 0
 
                 case idBtnCopyAddr:
+                        // Honour hand-edits / Regenerate: the copy uses the
+                        // CURRENT token field content, not the value captured
+                        // when the dialog opened.
+                        if cur := getWindowText(hwnd, idEditAuthToken); cur != "" {
+                                currentAuthToken = cur
+                        }
                         // Copy the current public URL to clipboard
                         if currentPublicURL != "" {
                                 fullURL := currentPublicURL
@@ -353,6 +359,9 @@ func settingsDlgProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) uint
                         // (a follow-up restart bounces the tunnel automatically).
                         tok := settings.GenerateToken()
                         setWindowText(hwnd, idEditAuthToken, tok)
+                        // Keep the copy-address row consistent: a later Copy
+                        // click must embed the NEW token, not the stale one.
+                        currentAuthToken = tok
                         log.Printf("[settings] token regenerated in dialog (len=%d)", len(tok))
                         return 0
                 }

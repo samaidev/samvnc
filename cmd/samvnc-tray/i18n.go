@@ -79,6 +79,8 @@ var msgMap = map[string]i18nPair{
         "dlg.groupGeneral": {"General", "通用"},
         "dlg.addrLabel":    {"Current Address", "当前地址"},
         "dlg.key":       {"Aitun.cc Key:", "Aitun.cc 密钥："},
+        "dlg.keyPh": {"aitun.cc key (leave empty for the free mode)",
+                "aitun.cc 密钥（留空使用免费模式）"},
         "dlg.token":     {"Access Token:", "访问令牌："},
         "dlg.tokenHint": {"click Regenerate (or clear + OK) for a new token",
                 "点击「重新生成」，或清空后确定，都会生成新令牌"},

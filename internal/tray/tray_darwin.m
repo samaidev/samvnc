@@ -71,6 +71,19 @@ static NSImage *defaultIcon(void) {
     return img; // caller releases
 }
 
+// samvncTrayIconImage builds an NSImage from the embedded cross-platform
+// PNG (same artwork as the Windows tray). Used by the settings window
+// header (settings_dialog_darwin.m). Returns a NEW image; caller releases.
+// Called on the main thread only.
+NSImage *samvncTrayIconImage(void) {
+    if (!g_iconPNG) return nil;
+    @try {
+        return [[NSImage alloc] initWithData:g_iconPNG];
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
+
 static void ensureStatusItem(void) {
     ensureHolder();
     if (!g_statusItem) {
