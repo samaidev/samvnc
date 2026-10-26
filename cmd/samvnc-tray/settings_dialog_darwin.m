@@ -191,6 +191,8 @@ static void applyTexts(const SamVNCSettingsTexts *t) {
     [g_tokenHint setStringValue:tokenHint];
     [g_btnRegen setTitle:btnRegen];
     [g_btnCopy setTitle:btnCopy];
+    [g_btnOK setTitle:btnOK];
+    [g_btnCancel setTitle:btnCancel];
     [g_langLabel setStringValue:langLabel];
     [g_autostartCheck setTitle:autostart];
 
