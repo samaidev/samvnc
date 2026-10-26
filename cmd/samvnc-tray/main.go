@@ -163,6 +163,30 @@ func main() {
         // Auto-start the server on launch.
         go app.startServer()
 
+        // `--settings` opens the settings dialog right after the tray is
+        // up: a legit CLI entry point (scriptable setups, screenshots in
+        // docs, CI smoke tests). It waits a few seconds for the tunnel URL
+        // so the dialog shows a realistic address row, then runs the modal
+        // loop on this (main) thread — the status item pops in while it is
+        // up — and when it closes, the normal tray run loop takes over.
+        for _, arg := range os.Args[1:] {
+                if arg == "--settings" {
+                        log.Printf("--settings: opening the settings dialog at startup")
+                        for i := 0; i < 50; i++ {
+                                a := app
+                                a.mu.Lock()
+                                u := a.publicURL
+                                a.mu.Unlock()
+                                if u != "" {
+                                        break
+                                }
+                                time.Sleep(200 * time.Millisecond)
+                        }
+                        app.openSettings()
+                        break
+                }
+        }
+
         // Run the tray event loop (blocks until exit).
         if err := t.Run(); err != nil {
                 // No GUI/tray environment (headless Linux over SSH, macOS
