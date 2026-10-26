@@ -141,6 +141,17 @@ func main() {
         // Resolve the UI language (settings override, else system default).
         SetLanguage(ResolveLang(s.Language))
 
+        // Linux-only scripted UI test: opens the REAL settings dialog and
+        // clicks through it programmatically (no tray, no server, no
+        // stale-process cleanup). Prints [SELFTEST] PASS/FAIL lines and
+        // the dialog's result JSON, then exits. No-op on other platforms.
+        for _, arg := range os.Args[1:] {
+                if arg == "--settings-selftest" {
+                        settingsSelftest = true
+                        os.Exit(runSettingsSelftest(s))
+                }
+        }
+
         // Kill stale processes from a previous run (prevents "Tunnel occupied").
         // Needs the tunnel key so only OUR stale aitun clients are targeted.
         killStaleProcesses(s.AgentToken)
