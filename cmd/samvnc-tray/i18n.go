@@ -55,7 +55,6 @@ var msgMap = map[string]i18nPair{
         "menu.autostart":  {"Auto-start on boot", "开机自动启动"},
         "menu.settings":   {"Settings...", "设置..."},
         "menu.copy":       {"Copy Address", "复制地址"},
-        "menu.screenshot": {"Screenshot", "截图"},
         "menu.exit":       {"Exit", "退出"},
 
         // Tray tooltips (appended after "SamVNC — ").
@@ -67,9 +66,6 @@ var msgMap = map[string]i18nPair{
         "tip.noStart":    {"Error (could not start)", "错误（启动失败）"},
         "tip.noURL":      {"No URL yet (server not ready)", "暂无地址（服务端未就绪）"},
         "tip.copied":     {"Address copied!", "地址已复制！"},
-        "tip.shotSaving": {"Taking screenshot…", "正在截图…"},
-        "tip.shotSaved":  {"Screenshot saved: %s", "截图已保存：%s"},
-        "tip.shotFail":   {"Screenshot failed", "截图失败"},
 
         // Settings dialog.
         "dlg.title":     {"SamVNC Settings", "SamVNC 设置"},
