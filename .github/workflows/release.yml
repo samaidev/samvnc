@@ -36,9 +36,12 @@ jobs:
           - { os: linux, arch: amd64, runs-on: ubuntu-latest, cgo: "0", ext: "" }
           - { os: linux, arch: arm64, runs-on: ubuntu-latest, cgo: "0", ext: "" }
           - { os: linux, arch: arm, runs-on: ubuntu-latest, cgo: "0", goarm: "7", ext: "" }
-          # macOS: cgo required (AppKit tray + native settings dialog) —
-          # build on native runners. macos-13 = Intel, macos-14 = Apple Silicon.
-          - { os: darwin, arch: amd64, runs-on: macos-13, cgo: "1", ext: "" }
+          # macOS: cgo required (AppKit tray + native settings dialog).
+          # Both arches build on macos-14 (Apple Silicon): the amd64 slice is
+          # cross-compiled with cgo (-arch x86_64 via the universal SDK) —
+          # macos-13 (Intel) runners are scarce and being deprecated, which
+          # left release builds stuck in queue for hours.
+          - { os: darwin, arch: amd64, runs-on: macos-14, cgo: "1", ext: "" }
           - { os: darwin, arch: arm64, runs-on: macos-14, cgo: "1", ext: "" }
           # Windows: pure Go (GDI tray) — cross-compilable, but build natively
           # so resource/icon handling stays consistent.
