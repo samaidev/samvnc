@@ -57,8 +57,10 @@ func killStaleProcesses(tunnelKey string) {
                 return
         }
         // Kill stale samvnc-server instances (image name is exact).
-        _ = exec.Command("taskkill", "/F", "/IM",
-                "samvnc-server.exe").Run()
+        // runHidden (CREATE_NO_WINDOW) keeps console tools from flashing a
+        // black window — the tray is a GUI-subsystem binary.
+        _ = runHidden(exec.Command("taskkill", "/F", "/IM",
+                "samvnc-server.exe"))
 
         if tunnelKey == "" {
                 // Free proxy-address mode: our stale clients carry NO key on
@@ -70,16 +72,16 @@ func killStaleProcesses(tunnelKey string) {
                                 "commandline like '%-p %' and " +
                                 "not commandline like '%-k %' and " +
                                 "not commandline like '%--tcp-ports%'"
-                _ = exec.Command("wmic", "process", "where", filter,
-                                "call", "terminate").Run()
+                _ = runHidden(exec.Command("wmic", "process", "where", filter,
+                                "call", "terminate"))
                 return
         }
         filter := fmt.Sprintf(
                 "name='aitun-client-windows-amd64.exe' and commandline like '%%%s%%'",
                 tunnelKey,
         )
-        _ = exec.Command("wmic", "process", "where", filter,
-                "call", "terminate").Run()
+        _ = runHidden(exec.Command("wmic", "process", "where", filter,
+                "call", "terminate"))
 }
 
 // Tray state constants.

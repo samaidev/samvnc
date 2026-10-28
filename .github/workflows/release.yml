@@ -42,7 +42,9 @@ jobs:
           - { os: darwin, arch: arm64, runs-on: macos-14, cgo: "1", ext: "" }
           # Windows: pure Go (GDI tray) — cross-compilable, but build natively
           # so resource/icon handling stays consistent.
-          - { os: windows, arch: amd64, runs-on: windows-latest, cgo: "0", ext: ".exe" }
+          # -H=windowsgui: GUI subsystem — no black console window on launch
+          # (logs go to ~/.samvnc/tray.log; children use CREATE_NO_WINDOW).
+          - { os: windows, arch: amd64, runs-on: windows-latest, cgo: "0", ext: ".exe", ld: "-H=windowsgui" }
     steps:
       - uses: actions/checkout@v4
 
@@ -59,7 +61,7 @@ jobs:
           CGO_ENABLED: ${{ matrix.cgo }}
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w" \
+          go build -trimpath -ldflags "-s -w ${{ matrix.ld }}" \
             -o "dist/samvnc-tray-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}" \
             ./cmd/samvnc-tray
 
