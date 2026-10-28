@@ -239,21 +239,32 @@ screen frame in the response.
 ## Build
 
 ```bash
-make            # → bin/samvnc-server
-make tray       # → bin/samvnc-tray (system tray app)
-make all-build  # → both server and tray
+make tray       # → bin/samvnc-tray (THE product: tray + embedded server)
+make            # → bin/samvnc-server (CLI-only wrapper for headless/CI, not published)
+make all-build  # → both
 ```
 
 Requires Go 1.21+. On Linux, libx11-dev is needed (for XTEST/XGetImage).
 The tray app uses the native Win32 API on Windows (no CGO required).
 
+## Releases — one binary per platform
+
+Every GitHub release ships EXACTLY six assets, one self-contained
+`samvnc-tray` binary per platform (`linux-{amd64,arm64,arm}`,
+`darwin-{amd64,arm64}`, `windows-amd64.exe`). Since v1.7.0 the tray
+embeds the full server stack in-process (`internal/serverapp`), so there
+are no separate `samvnc-server` assets and no per-platform archives —
+the single binary is the whole product. Releases are cut automatically
+by `.github/workflows/release.yml` when a `v*` tag is pushed.
+
 ## System Tray (samvnc-tray)
 
-The tray app (`cmd/samvnc-tray`) provides a system tray icon that manages
-the `samvnc-server` subprocess. It auto-starts the server on launch and
-provides a context menu with:
+The tray app (`cmd/samvnc-tray`) is the single published binary: it
+provides a system tray icon AND hosts the samvnc server stack in-process
+(via `internal/serverapp`) — no separate `samvnc-server` subprocess. It
+auto-starts the server on launch and provides a context menu with:
 
-- **Start / Stop** — mutually exclusive; starts or stops the server subprocess
+- **Start / Stop** — mutually exclusive; starts or stops the embedded server
 - **Auto-start on boot** — toggle (mutually exclusive); registers the tray
   binary for boot-time startup via Windows Registry (Win), LaunchAgent (macOS),
   or `.desktop` autostart file (Linux)
@@ -400,8 +411,8 @@ curl -X POST http://localhost:8128/api/cdp/drag \
 ```
 samvnc/
 ├── cmd/
-│   ├── samvnc-server/main.go    # main server binary
-│   ├── samvnc-tray/main.go      # system tray app (manages server subprocess)
+│   ├── samvnc-tray/main.go      # published binary: tray + embedded server
+│   ├── samvnc-server/main.go    # CLI-only wrapper (headless/CI, not published)
 │   ├── desktop-controller/main.go  # standalone X11 control daemon (optional)
 │   ├── fwd/main.go              # port-forwarding helper
 │   └── wstest/main.go           # WebSocket test client
@@ -414,6 +425,7 @@ samvnc/
 │   │   ├── api_desktop.go       # /api/mouse/* + /api/key/* remote-desktop API
 │   │   └── assets/              # browser client (HTML/JS/CSS)
 │   ├── tray/                    # cross-platform system tray (Win32 Shell_NotifyIcon)
+│   ├── serverapp/               # embeddable server stack (used by the tray)
 │   ├── settings/                # tray settings persistence (~/.samvnc/settings.json)
 │   ├── autostart/               # boot-time auto-start (Win Registry / macOS LaunchAgent / Linux .desktop)
 │   ├── cdp/

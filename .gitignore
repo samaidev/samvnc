@@ -13,3 +13,7 @@
 *.addr
 logs/
 
+
+# Stray build artifacts accidentally committed at repo root.
+/samvnc-tray
+/samvnc-tray.exe

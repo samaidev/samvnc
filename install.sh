@@ -3,39 +3,39 @@
 #
 # Usage:
 #   curl -fsSL https://samai.cc/samvnc/install.sh | bash
-#   curl -fsSL https://samai.cc/samvnc/install.sh | bash -s -- --version v1.4.1
+#   curl -fsSL https://samai.cc/samvnc/install.sh | bash -s -- --version v1.7.0
 #
-# Downloads the samvnc-server AND samvnc-tray binaries for the current
-# platform and installs them to /usr/local/bin (with root) or
-# ~/.local/bin (without root).
+# Downloads the samvnc-tray binary for the current platform and installs
+# it to /usr/local/bin (with root) or ~/.local/bin (without root).
 #
-# Default source is the PUBLIC mirror on samai.cc (the GitHub repo is
-# private — raw.githubusercontent and release downloads 404 for
-# anonymous users). --version <tag> pulls from GitHub Releases instead
-# and requires GitHub access to that repo.
+# Since v1.7.0 samvnc ships as a SINGLE self-contained binary:
+# `samvnc-tray` embeds the full server stack in-process. On desktops it
+# brings up the native system tray (one unified icon on
+# Windows/macOS/Linux); on headless machines (SSH, no desktop) it detects
+# the missing GUI and falls back to server-only mode, so the same command
+# works everywhere.
 #
-# `samvnc-tray` is the recommended start command: it brings up the native
-# system tray (one unified icon on Windows/macOS/Linux) and launches the
-# server automatically. On headless machines (SSH, no desktop) the tray
-# binary detects the missing GUI and falls back to server-only mode, so
-# the same command works everywhere.
+# Default source is the PUBLIC mirror on samai.cc (faster for some
+# regions). --version <tag> pulls from GitHub Releases instead.
+#
+# The mirror mirrors every release's binaries here, flat, latest release
+# only.
 
 set -euo pipefail
 
 REPO="samaidev/samvnc"
-BIN_NAME="samvnc-server"
 TRAY_NAME="samvnc-tray"
 INSTALL_DIR=""
 REQUESTED_VERSION=""
 
-# Public mirror (works for EVERYONE — the GitHub repo is private, so
-# raw.githubusercontent and release downloads 404 for anonymous users).
-# wf3 mirrors every release's binaries here, flat, latest release only.
+# Public mirror (faster for some regions; also used as a fallback when
+# GitHub is unreachable). Mirrors every release's binaries here, flat,
+# latest release only.
 MIRROR="https://samai.cc/samvnc/downloads"
 
-# Fallback: the most recent release known to ship every platform binary.
-# If the latest release does not include your platform, we retry from here
-# so the one-line install keeps working between releases.
+# Fallback: the most recent release known to ship every platform tray
+# binary. If the latest release does not include your platform, we retry
+# from here so the one-line install keeps working between releases.
 FALLBACK_TAG="v1.4.1"
 
 while [[ $# -gt 0 ]]; do
@@ -67,8 +67,7 @@ case "$ARCH" in
     armv7l|armv6l|arm)   PLATFORM_ARCH="arm" ;;
     *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
-REMOTE_FILE="samvnc-server-${PLATFORM_OS}-${PLATFORM_ARCH}"
-TRAY_REMOTE_FILE="samvnc-tray-${PLATFORM_OS}-${PLATFORM_ARCH}"
+REMOTE_FILE="samvnc-tray-${PLATFORM_OS}-${PLATFORM_ARCH}"
 echo "Detected platform: ${PLATFORM_OS}-${PLATFORM_ARCH}"
 
 # --- install dir --------------------------------------------------------
@@ -162,23 +161,11 @@ install_asset() { # install_asset <remote-file> <dest-name> <required:yes/no>
     echo "Installed: ${INSTALL_DIR}/${name} (${tag})"
 }
 
-# --- install: server (required) + tray (best effort) ---------------------
-install_asset "$REMOTE_FILE" "$BIN_NAME" yes
-if install_asset "$TRAY_REMOTE_FILE" "$TRAY_NAME" no; then
-    TRAY_OK=1
-else
-    TRAY_OK=0
-    echo "NOTE: no ${TRAY_REMOTE_FILE} asset in this release — skipped." >&2
-    echo "      The tray UI is not available for this platform yet;" >&2
-    echo "      start the server directly with 'samvnc-server --verbose'." >&2
-fi
+# --- install: the single tray binary (server included) --------------------
+install_asset "$REMOTE_FILE" "$TRAY_NAME" yes
 
 echo ""
-if [[ "$TRAY_OK" == "1" ]]; then
-    echo "Run 'samvnc-tray' to start — it shows the system-tray icon and"
-    echo "launches the server automatically (on headless machines it runs"
-    echo "the server in the foreground instead and prints the public URL)."
-else
-    echo "Run 'samvnc-server --verbose' to start — it prints your public access URL."
-fi
+echo "Run 'samvnc-tray' to start — it shows the system-tray icon and runs"
+echo "the embedded server (on headless machines it runs in the foreground"
+echo "instead and prints the public URL)."
 echo "Re-run this installer anytime to update."

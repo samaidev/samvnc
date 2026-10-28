@@ -1,0 +1,106 @@
+# SamVNC release pipeline.
+#
+# POLICY: every release ships EXACTLY SIX assets — one self-contained
+# samvnc-tray binary per supported platform/arch. Nothing else:
+#
+#   samvnc-tray-linux-amd64        samvnc-tray-darwin-amd64
+#   samvnc-tray-linux-arm64        samvnc-tray-darwin-arm64
+#   samvnc-tray-linux-arm          samvnc-tray-windows-amd64.exe
+#
+# Since v1.7.0 the tray binary embeds the full server stack in-process
+# (internal/serverapp), so there are NO separate samvnc-server assets and
+# no per-platform archives — one binary IS the product. The install.sh
+# one-liner depends on these exact asset names.
+#
+# Triggered by pushing a tag:  git tag v1.7.0 && git push origin v1.7.0
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: pure Go (X11 via xgb, tray via dbus) — cross-compile, no cgo.
+          - { os: linux, arch: amd64, runs-on: ubuntu-latest, cgo: "0", ext: "" }
+          - { os: linux, arch: arm64, runs-on: ubuntu-latest, cgo: "0", ext: "" }
+          - { os: linux, arch: arm, runs-on: ubuntu-latest, cgo: "0", goarm: "7", ext: "" }
+          # macOS: cgo required (AppKit tray + native settings dialog) —
+          # build on native runners. macos-13 = Intel, macos-14 = Apple Silicon.
+          - { os: darwin, arch: amd64, runs-on: macos-13, cgo: "1", ext: "" }
+          - { os: darwin, arch: arm64, runs-on: macos-14, cgo: "1", ext: "" }
+          # Windows: pure Go (GDI tray) — cross-compilable, but build natively
+          # so resource/icon handling stays consistent.
+          - { os: windows, arch: amd64, runs-on: windows-latest, cgo: "0", ext: ".exe" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build samvnc-tray
+        shell: bash
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" \
+            -o "dist/samvnc-tray-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}" \
+            ./cmd/samvnc-tray
+
+      - name: Smoke test (version output must not crash)
+        shell: bash
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        run: |
+          file dist/samvnc-tray-linux-amd64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: samvnc-tray-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release (exactly six tray assets)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -la dist/
+          count=$(ls dist/ | wc -l)
+          if [ "$count" -ne 6 ]; then
+            echo "Expected 6 tray assets, found $count — aborting." >&2
+            exit 1
+          fi
+          # Create the release; if it already exists (rerun), just replace assets.
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "samvnc $TAG" \
+            --notes "Single self-contained binary per platform: \`samvnc-tray\` now embeds the full server (no separate samvnc-server download). For the public tunnel, have the aitun client on PATH (\`pip install aitun\`). Install: \`curl -fsSL https://samai.cc/samvnc/install.sh | bash\`" \
+            || gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"

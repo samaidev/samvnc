@@ -1,7 +1,9 @@
 // SamVNC tray application entry point.
 //
-// This binary provides a system tray icon that manages the samvnc-server
-// subprocess. The tray menu provides:
+// This SINGLE binary is the whole product: it provides the system tray
+// icon AND hosts the samvnc server stack in-process (via
+// internal/serverapp). There is no separate samvnc-server subprocess to
+// ship, find, or upgrade anymore. The tray menu provides:
 //
 //   - Start / Stop (mutually exclusive)
 //   - Enable / Disable auto-start (mutually exclusive)
@@ -10,35 +12,36 @@
 //   - Exit
 //
 // The tray app loads settings from ~/.samvnc/settings.json, auto-generates
-// an auth token on first run, and passes it to samvnc-server via -token.
-// The public URL (with ?token=xxx appended) can be copied to clipboard
+// an auth token on first run, and hands it to the embedded server. The
+// public URL (with ?token=xxx appended) can be copied to clipboard
 // and opened in any browser to access the remote desktop.
 package main
 
 import (
-        "bufio"
         "fmt"
         "log"
         "os"
         "os/exec"
         "os/signal"
         "path/filepath"
-        "regexp"
         "runtime"
-        "strconv"
         "strings"
         "sync"
         "syscall"
         "time"
 
         "github.com/samaidev/samvnc/internal/autostart"
+        "github.com/samaidev/samvnc/internal/config"
+        "github.com/samaidev/samvnc/internal/serverapp"
         "github.com/samaidev/samvnc/internal/settings"
         "github.com/samaidev/samvnc/internal/tray"
 )
 
-// killStaleProcesses kills any leftover samvnc-server subprocess and the
-// stale aitun tunnel clients of previous runs, so the new tunnel connection
-// is not rejected with "Tunnel occupied by another client".
+// killStaleProcesses kills any leftover samvnc-server subprocess from
+// pre-1.7 installs (the server used to be a separate binary; it is now
+// embedded) and the stale aitun tunnel clients of previous runs, so the
+// new tunnel connection is not rejected with
+// "Tunnel occupied by another client".
 //
 // tunnelKey (settings.AgentToken) identifies OUR clients: every tray/server
 // restart orphans the previous aitun client (the server is killed but the
@@ -86,7 +89,7 @@ const (
         stateRunning  = "running"
 )
 
-// TrayApp manages the tray icon and the samvnc-server subprocess.
+// TrayApp manages the tray icon and the embedded (in-process) server.
 type TrayApp struct {
         mu       sync.Mutex
         settings *settings.Settings
@@ -101,10 +104,9 @@ type TrayApp struct {
         // outer one (mysteriously restored/corrupted values).
         settingsDialogOpen bool
 
-        // Subprocess management.
-        cmd      *exec.Cmd
+        // Embedded server instance (nil when stopped).
+        app       *serverapp.App
         publicURL string // e.g. https://samvnc-host-abc.t.aitun.cc
-        cancel   chan struct{}
 }
 
 func main() {
@@ -159,7 +161,6 @@ func main() {
         app := &TrayApp{
                 settings: s,
                 state:    stateStopped,
-                cancel:   make(chan struct{}),
         }
 
         // Create tray.
@@ -202,7 +203,7 @@ func main() {
         if err := t.Run(); err != nil {
                 // No GUI/tray environment (headless Linux over SSH, macOS
                 // launchd without an Aqua session, ...). DO NOT exit here:
-                // the server subprocess is already up and serving, and the
+                // the embedded server is already up and serving, and the
                 // documented one-click start command is `samvnc-tray` — it
                 // must keep working without a desktop. Fall back to a
                 // server-only foreground mode until interrupted.
@@ -259,15 +260,15 @@ func runServerOnly(app *TrayApp) {
 // onMenuItem is called when a tray menu item is clicked.
 //
 // NOTE: this runs on the tray window thread (from the WM_COMMAND handler).
-// Anything that can block (taskkill, cmd.Wait) MUST run in a goroutine —
+// Anything that can block (app.Stop, wmic) MUST run in a goroutine —
 // blocking here freezes the menu and all further tray interaction.
 func (a *TrayApp) onMenuItem(itemID string) {
         switch itemID {
         case "start":
                 go a.startServer()
         case "stop":
-                // stopServer shells out to taskkill and waits for the
-                // process to die — never do that on the UI thread.
+                // stopServer shuts down the embedded server and waits for
+                // it — never do that on the UI thread.
                 go a.stopServer()
         case "autostart_on":
                 a.toggleAutoStart(true)
@@ -291,7 +292,7 @@ func (a *TrayApp) onMenuItem(itemID string) {
         }
 }
 
-// startServer starts the samvnc-server subprocess.
+// startServer starts the embedded server stack (in-process).
 func (a *TrayApp) startServer() {
         a.mu.Lock()
         if a.state == stateRunning || a.state == stateStarting {
@@ -305,172 +306,111 @@ func (a *TrayApp) startServer() {
         a.refreshMenu()
         a.tray.SetTooltip("SamVNC — " + tr("tip.starting"))
 
-        // Find the samvnc-server binary.
-        serverPath := findServerBinary()
-        log.Printf("[tray] serverPath=%q", serverPath)
-        if serverPath == "" {
-                a.mu.Lock()
-                a.state = stateStopped
-                a.mu.Unlock()
-                a.refreshMenu()
-                a.tray.SetTooltip("SamVNC — " + tr("tip.noServer"))
-                return
-        }
+        // Build the server configuration from the tray settings. This mirrors
+        // the command line the tray used to pass to the samvnc-server subprocess
+        // (-token … -verbose [-aitun-token|-aitun-agent-token] [-aitun-subdomain]).
+        cfg := config.FromEnv()
+        cfg.AuthToken = a.settings.AuthToken
+        cfg.Verbose = true
+        cfg.Tunnel.Enabled = true
 
-        // Build command arguments.
-        args := []string{
-                "-token", a.settings.AuthToken,
-                "-verbose",
-        }
-        // The key can be either an agent token (aitagt_...) or a tunnel token (ait_...).
-        // Agent tokens auto-register a subdomain; tunnel tokens connect directly.
-        key := a.settings.AgentToken
-        if key != "" {
+        // The key can be either an agent token (aitagt_...) or a tunnel token
+        // (ait_...). Agent tokens auto-register a subdomain; tunnel tokens
+        // connect directly.
+        agentToken := ""
+        if key := a.settings.AgentToken; key != "" {
                 if strings.HasPrefix(key, "ait_") {
-                        // Tunnel token — use directly.
-                        args = append(args, "-aitun-token", key)
+                        cfg.Tunnel.Token = key
                 } else {
-                        // Agent token — for auto subdomain registration.
-                        args = append(args, "-aitun-agent-token", key)
+                        agentToken = key
                 }
         }
         if a.settings.Subdomain != "" {
-                args = append(args, "-aitun-subdomain", a.settings.Subdomain)
+                cfg.Tunnel.Subdomain = a.settings.Subdomain
         }
 
-        cmd := exec.Command(serverPath, args...)
-        cmd.Env = os.Environ()
-
-        // Capture stdout to find the public URL.
-        stdout, err := cmd.StdoutPipe()
-        if err != nil {
+        // onURL fires from inside serverapp.Start once the tunnel reports the
+        // public URL (same signal the old stdout scraping looked for, just
+        // without the text parsing).
+        onURL := func(u string) {
                 a.mu.Lock()
-                a.state = stateStopped
+                a.publicURL = u
                 a.mu.Unlock()
+                a.tray.SetTooltip("SamVNC — " + tr("tip.running"))
                 a.refreshMenu()
-                return
-        }
-        // Capture stderr too — server logs go to stderr.
-        stderr, err := cmd.StderrPipe()
-        if err != nil {
-                stderr = nil
         }
 
-        log.Printf("[tray] starting server: %s %v", serverPath, args)
-        if err := cmd.Start(); err != nil {
-                log.Printf("[tray] cmd.Start error: %v", err)
-                a.mu.Lock()
-                a.state = stateStopped
-                a.mu.Unlock()
-                a.refreshMenu()
-                a.tray.SetTooltip("SamVNC — " + tr("tip.noStart"))
-                return
-        }
-        log.Printf("[tray] server started, PID=%d", cmd.Process.Pid)
-
-        a.mu.Lock()
-        a.cmd = cmd
-        a.state = stateRunning
-        a.publicURL = ""
-        a.mu.Unlock()
-
-        a.refreshMenu()
-        a.tray.SetTooltip("SamVNC — " + tr("tip.waitingURL"))
-
-        // Pump stdout to find the public URL.
-        urlRE := regexp.MustCompile(`https?://[^\s]+`)
-        scanLines := func(r interface{ Read([]byte) (int, error) }) {
-                scanner := bufio.NewScanner(r)
-                scanner.Buffer(make([]byte, 0, 4096), 1<<20)
-                for scanner.Scan() {
-                        line := scanner.Text()
-                        log.Printf("[server] %s", line)
-                        // Look for the public URL line (case-insensitive).
-                        lower := strings.ToLower(line)
-                        if strings.Contains(lower, "public url") ||
-                                strings.Contains(lower, "tunnel: public url") ||
-                                strings.Contains(lower, "open in browser") ||
-                                strings.Contains(line, "aitun.cc") {
-                                if u := urlRE.FindString(line); u != "" && !strings.Contains(u, "<") {
-                                        // "<" rejects the placeholder in the
-                                        // keyless-mode hint line ("random
-                                        // https://aitun.cc/<code> URL") — that
-                                        // line matches "aitun.cc" but holds no
-                                        // real address, and grabbing it made
-                                        // Copy Address copy a bogus URL.
-                                        //
-                                        // The server may also print the URL
-                                        // with the auth token appended
-                                        // (?token=…) in its "open in browser"
-                                        // line. The tray appends the token
-                                        // itself in copyAddress, so strip any
-                                        // query string to avoid the duplicate
-                                        // "?token=…&token=…" shape.
-                                        if i := strings.IndexByte(u, '?'); i >= 0 {
-                                                u = u[:i]
-                                        }
-                                        a.mu.Lock()
-                                        a.publicURL = u
-                                        a.mu.Unlock()
-                                        a.tray.SetTooltip("SamVNC — " + tr("tip.running"))
-                                        a.refreshMenu()
-                                }
-                        }
-                }
-        }
-        go scanLines(stdout)
-        if stderr != nil {
-                go scanLines(stderr)
-        }
-
-        // Wait for the process to exit.
         go func() {
-                _ = cmd.Wait()
+                app, err := serverapp.Start(serverapp.Options{
+                        Config:     cfg,
+                        AgentToken: agentToken,
+                        OnURL:      onURL,
+                })
+                if err != nil {
+                        log.Printf("[tray] server start error: %v", err)
+                        a.mu.Lock()
+                        if a.state == stateStarting {
+                                a.state = stateStopped
+                        }
+                        a.mu.Unlock()
+                        a.refreshMenu()
+                        a.tray.SetTooltip("SamVNC — " + tr("tip.noStart"))
+                        return
+                }
+
+                // Publish the app and mark running. The OnURL callback may already
+                // have fired (it happens inside Start), so pick up the URL too.
                 a.mu.Lock()
-                a.state = stateStopped
-                a.publicURL = ""
-                a.cmd = nil
+                a.app = app
+                a.state = stateRunning
+                if u := app.URL(); u != "" {
+                        a.publicURL = u
+                }
+                a.mu.Unlock()
+                a.refreshMenu()
+                if app.URL() == "" {
+                        a.tray.SetTooltip("SamVNC — " + tr("tip.waitingURL"))
+                } else {
+                        a.tray.SetTooltip("SamVNC — " + tr("tip.running"))
+                }
+
+                // Block until the app is stopped (mirrors the old cmd.Wait).
+                app.Wait()
+
+                a.mu.Lock()
+                // Only reset OUR run — a quick Stop→Start cycle may already have
+                // a newer instance in place.
+                if a.app == app {
+                        a.state = stateStopped
+                        a.publicURL = ""
+                        a.app = nil
+                }
                 a.mu.Unlock()
                 a.refreshMenu()
                 a.tray.SetTooltip("SamVNC — " + tr("tip.stopped"))
         }()
 }
 
-// stopServer stops the samvnc-server subprocess.
+// stopServer stops the embedded server stack.
 //
 // Idempotent: duplicate "stop" commands (the tray shell can deliver two
 // WM_COMMANDs for one click) resolve to a harmless no-op instead of
 // killing a freshly restarted server.
 func (a *TrayApp) stopServer() {
         a.mu.Lock()
-        cmd := a.cmd
+        app := a.app
         a.state = stateStopped
         a.publicURL = ""
-        a.cmd = nil
+        a.app = nil
         a.mu.Unlock()
 
-        if cmd != nil && cmd.Process != nil {
-                log.Printf("[tray] stopping server PID=%d", cmd.Process.Pid)
-                // Kill the entire process tree (server + aitun-client child).
-                killProcessTree(cmd.Process)
-                _ = cmd.Wait()
+        if app != nil {
+                log.Printf("[tray] stopping embedded server")
+                app.Stop()
                 log.Printf("[tray] server stopped")
         }
         a.refreshMenu()
         a.tray.SetTooltip("SamVNC — " + tr("tip.stopped"))
-}
-
-// killProcessTree kills a process and all its children.
-func killProcessTree(proc *os.Process) {
-        if proc == nil {
-                return
-        }
-        // On Windows, use taskkill /T /F to kill the process tree.
-        if runtime.GOOS == "windows" {
-                _ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(proc.Pid)).Run()
-        } else {
-                _ = proc.Kill()
-        }
 }
 
 // toggleAutoStart enables or disables boot-time auto-start.
@@ -735,40 +675,6 @@ func (a *TrayApp) refreshMenu() {
         })
 
         a.tray.SetMenu(items)
-}
-
-// findServerBinary locates the samvnc-server binary.
-func findServerBinary() string {
-        // 1. Same directory as this binary.
-        if self, err := os.Executable(); err == nil {
-                dir := filepath.Dir(self)
-                name := serverBinaryName()
-                p := filepath.Join(dir, name)
-                if _, err := os.Stat(p); err == nil {
-                        return p
-                }
-        }
-
-        // 2. Current working directory.
-        p := filepath.Join(".", serverBinaryName())
-        if _, err := os.Stat(p); err == nil {
-                abs, _ := filepath.Abs(p)
-                return abs
-        }
-
-        // 3. PATH lookup.
-        if p, err := exec.LookPath(serverBinaryName()); err == nil {
-                return p
-        }
-
-        return ""
-}
-
-func serverBinaryName() string {
-        if runtime.GOOS == "windows" {
-                return "samvnc-server.exe"
-        }
-        return "samvnc-server"
 }
 
 // findSelfPath returns the path to this binary (for auto-start registration).
