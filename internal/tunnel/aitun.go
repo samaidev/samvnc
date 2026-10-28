@@ -23,6 +23,8 @@ import (
         "strings"
         "sync"
         "time"
+
+        "github.com/samaidev/samvnc/internal/tunnel/clientbin"
 )
 
 // Config configures the aitun client subprocess.
@@ -287,6 +289,14 @@ func resolveBinary(explicit string) (string, error) {
                         }
                 }
         }
+        // Pinned client embedded in THIS binary (internal/tunnel/clientbin):
+        // extracted to ~/.samvnc/bin on first use. Preferred over PATH for
+        // the same pinned-version reason as above — the embedded client is
+        // known to speak the current relay protocol, while a stale
+        // pip-installed one can get stuck in endless "bad handshake" retries.
+        if p, err := clientbin.Extract(); err == nil && p != "" {
+                return p, nil
+        }
         for _, name := range []string{"aitun", "aitun-client"} {
                 if p, err := exec.LookPath(name); err == nil {
                         return p, nil
@@ -302,7 +312,8 @@ func resolveBinary(explicit string) (string, error) {
                         return p, nil
                 }
         }
-        return "", errors.New("tunnel: aitun client not found (install with `pip install aitun` or see https://aitun.cc)")
+        return "", fmt.Errorf("tunnel: aitun client not found (no embedded client for %s/%s; install with `pip install aitun` or see https://aitun.cc)",
+                runtime.GOOS, runtime.GOARCH)
 }
 
 // bundledClientNames returns the expected file names of an aitun client

@@ -104,5 +104,5 @@ jobs:
           gh release create "$TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "samvnc $TAG" \
-            --notes "Single self-contained binary per platform: \`samvnc-tray\` now embeds the full server (no separate samvnc-server download). For the public tunnel, have the aitun client on PATH (\`pip install aitun\`). Install: \`curl -fsSL https://samai.cc/samvnc/install.sh | bash\`" \
+            --notes "Single self-contained binary per platform: \`samvnc-tray\` embeds the full server AND the pinned aitun tunnel client — no extra downloads, the tunnel works out of the box. Install: \`curl -fsSL https://samai.cc/samvnc/install.sh | bash\`" \
             || gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"

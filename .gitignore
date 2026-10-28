@@ -2,6 +2,10 @@
 /dist/
 *.exe
 *.test
+
+# Embedded pinned aitun clients (go:embed in internal/tunnel/clientbin)
+!internal/tunnel/clientbin/*.exe
+!internal/tunnel/clientbin/aitun-client-*
 *.out
 .env
 .env.runtime
