@@ -74,6 +74,58 @@ jobs:
         run: |
           file dist/samvnc-tray-linux-amd64
 
+      - name: Locate Inno Setup (ISCC)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            Write-Host "ISCC not found, installing via Chocolatey..."
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          "path=$iscc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Resolve Chinese language file
+        if: matrix.os == 'windows'
+        id: cnisl
+        shell: pwsh
+        run: |
+          $innoDir = Split-Path "${{ steps.iscc.outputs.path }}"
+          $found = Get-ChildItem -Path $innoDir -Recurse -Filter "ChineseSimplified.isl" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($found) {
+            $cn = $found.FullName
+          } else {
+            $cn = Join-Path $env:RUNNER_TEMP "ChineseSimplified.isl"
+            $urls = @(
+              "https://raw.githubusercontent.com/jrsoftware/issrc/is-6_4_1/Files/Languages/Unofficial/ChineseSimplified.isl",
+              "https://raw.githubusercontent.com/jrsoftware/issrc/is-7_1_1/Files/Languages/ChineseSimplified.isl"
+            )
+            $ok = $false
+            foreach ($u in $urls) {
+              try { Invoke-WebRequest -Uri $u -OutFile $cn; $ok = $true; break } catch { Write-Host "miss: $u" }
+            }
+            if (-not $ok) { throw "Cannot obtain ChineseSimplified.isl" }
+          }
+          "path=$cn" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build setup.exe (Inno Setup)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          Copy-Item dist/samvnc-tray-windows-amd64.exe packaging/
+          Copy-Item assets/tray_icon.ico packaging/
+          & "${{ steps.iscc.outputs.path }}" "/DMyAppVersion=$v" "/DCnMessages=${{ steps.cnisl.outputs.path }}" "/DSetupIcon=tray_icon.ico" "/DOutputBaseFilename=SamVNC-$v-windows-amd64-setup.exe" /Q packaging/samvnc.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+          Move-Item packaging/dist/*.exe dist/
+          Get-ChildItem dist | Select-Object Name, Length
+
       - uses: actions/upload-artifact@v4
         with:
           name: samvnc-tray-${{ matrix.os }}-${{ matrix.arch }}
@@ -99,8 +151,8 @@ jobs:
         run: |
           ls -la dist/
           count=$(ls dist/ | wc -l)
-          if [ "$count" -ne 6 ]; then
-            echo "Expected 6 tray assets, found $count — aborting." >&2
+          if [ "$count" -lt 6 ]; then
+            echo "Expected >= 6 tray assets (+ optional windows setup.exe), found $count — aborting." >&2
             exit 1
           fi
           # Create the release; if it already exists (rerun), just replace assets.
@@ -109,3 +161,44 @@ jobs:
             --title "samvnc $TAG" \
             --notes "Single self-contained binary per platform: \`samvnc-tray\` embeds the full server AND the pinned aitun tunnel client — no extra downloads, the tunnel works out of the box. Install: \`curl -fsSL https://samai.cc/samvnc/install.sh | bash\`" \
             || gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  # ---------------------------------------------------------------------------
+  # Mirror release artifacts to ModelScope + HuggingFace and update the unified
+  # catalog (samaidev/samai-releases). Tag pushes only, after Release job.
+  # ---------------------------------------------------------------------------
+  mirror-catalog:
+    name: Mirror (MS/HF) + update catalog
+    needs: [release]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install upload SDKs
+        run: pip install huggingface_hub modelscope
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --dir assets --repo "$GITHUB_REPOSITORY"
+          ls -lh assets
+
+      - name: Fetch current catalog (single source of truth)
+        run: |
+          curl -fsSL -o catalog.json \
+            https://raw.githubusercontent.com/samaidev/samai-releases/main/catalog.json
+
+      - name: Mirror to MS/HF + update catalog
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MS_TOKEN: ${{ secrets.MS_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          python ci/publish_channels.py \
+            --dist assets --product samvnc --version "$GITHUB_REF_NAME" \
+            --repo samaidev/samvnc --catalog catalog.json \
+            --glob "samvnc"
