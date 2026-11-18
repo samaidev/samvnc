@@ -41,8 +41,8 @@ jobs:
           # cross-compiled with cgo (-arch x86_64 via the universal SDK) —
           # macos-13 (Intel) runners are scarce and being deprecated, which
           # left release builds stuck in queue for hours.
-          - { os: darwin, arch: amd64, runs-on: macos-14, cgo: "1", ext: "" }
-          - { os: darwin, arch: arm64, runs-on: macos-14, cgo: "1", ext: "" }
+          - { os: darwin, arch: amd64, runs-on: macos-latest, cgo: "1", ext: "" }
+          - { os: darwin, arch: arm64, runs-on: macos-latest, cgo: "1", ext: "" }
           # Windows: pure Go (GDI tray) — cross-compilable, but build natively
           # so resource/icon handling stays consistent.
           # -H=windowsgui: GUI subsystem — no black console window on launch
