@@ -122,7 +122,7 @@ jobs:
           $v = "${{ github.ref_name }}".TrimStart('v')
           Copy-Item dist/samvnc-tray-windows-amd64.exe packaging/
           Copy-Item assets/tray_icon.ico packaging/
-          & "${{ steps.iscc.outputs.path }}" "/DMyAppVersion=$v" "/DCnMessages=${{ steps.cnisl.outputs.path }}" "/DSetupIcon=tray_icon.ico" "/DOutputBaseFilename=SamVNC-$v-windows-amd64-setup.exe" /Q packaging/samvnc.iss
+          & "${{ steps.iscc.outputs.path }}" "/DMyAppVersion=$v" "/DCnMessages=${{ steps.cnisl.outputs.path }}" "/DSetupIcon=tray_icon.ico" "/DOutputBaseFilename=SamVNC-$v-windows-amd64-setup" /Q packaging/samvnc.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
           Move-Item packaging/dist/*.exe dist/
           Get-ChildItem dist | Select-Object Name, Length
