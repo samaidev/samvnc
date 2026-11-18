@@ -1,0 +1,4 @@
+v1.7.3
+SamVNC-1.7.3-windows-amd64-setup.exe
+11179741
+5dd63a457b1d0c80bb4887ca3b2a9913dd59e763afcdddc90a5eeaf0ace23655
