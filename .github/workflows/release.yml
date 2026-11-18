@@ -75,6 +75,7 @@ jobs:
           file dist/samvnc-tray-linux-amd64
 
       - name: Locate Inno Setup (ISCC)
+        id: iscc
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
